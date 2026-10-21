@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacBrowser</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div class="side-head">位置</div>
+    <div id="places" class="side-list"></div>
+    <div class="side-head">本機磁碟</div>
+    <div id="drives" class="side-list"></div>
+    <div class="side-head">網路（SMB）<button id="addConnBtn" class="mini" title="新增連線">＋</button></div>
+    <div id="conns" class="side-list"></div>
+  </aside>
+  <main>
+    <div id="toolbar">
+      <button id="back" class="tb" title="上一頁 (Alt+←)">◀</button>
+      <button id="fwd" class="tb" title="下一頁 (Alt+→)">▶</button>
+      <button id="up" class="tb" title="上層 (Alt+↑)">▲</button>
+      <button id="refresh" class="tb" title="重新整理 (F5)">⟳</button>
+      <input id="addr" spellcheck="false" placeholder="路徑：C:\... 或 smb://名稱/...">
+      <input id="search" placeholder="篩選目前資料夾…" title="Ctrl+F">
+      <button id="findBtn" title="遞迴搜尋子資料夾">深入搜尋</button>
+      <button id="uploadBtn" title="上傳檔案到此資料夾（也可直接拖檔案進來）">⬆ 上傳</button>
+      <select id="sort" title="排序">
+        <option value="name">名稱</option>
+        <option value="size">大小</option>
+        <option value="mod">修改日期</option>
+        <option value="type">類型</option>
+      </select>
+      <button id="sortDir" class="tb" title="切換排序方向">↑</button>
+      <input type="range" id="tileSize" min="96" max="320" step="8" title="縮圖大小">
+      <label class="chk" title="滑鼠停留幾秒後顯示預覽">預覽 <input type="number" id="hoverDelay" min="0.5" max="30" step="0.5" style="width:52px"> 秒</label>
+      <label class="chk"><input type="checkbox" id="showLabels">色標</label>
+      <label class="chk"><input type="checkbox" id="showHidden">隱藏檔</label>
+    </div>
+    <div id="labelbar">
+      <span class="lb-title">顏色篩選：</span>
+      <button class="chip" data-color="0">全部</button>
+      <button class="chip" data-color="1"><i class="dotc" style="background:var(--c1)"></i>灰</button>
+      <button class="chip" data-color="2"><i class="dotc" style="background:var(--c2)"></i>綠</button>
+      <button class="chip" data-color="3"><i class="dotc" style="background:var(--c3)"></i>紫</button>
+      <button class="chip" data-color="4"><i class="dotc" style="background:var(--c4)"></i>藍</button>
+      <button class="chip" data-color="5"><i class="dotc" style="background:var(--c5)"></i>黃</button>
+      <button class="chip" data-color="6"><i class="dotc" style="background:var(--c6)"></i>紅</button>
+      <button class="chip" data-color="7"><i class="dotc" style="background:var(--c7)"></i>橘</button>
+    </div>
+    <div id="gridwrap">
+      <div id="grid"><div id="band" hidden></div></div>
+      <div id="empty" hidden>此資料夾是空的</div>
+    </div>
+    <input type="file" id="fileInput" multiple style="display:none">
+    <div id="status"><span id="statusL"></span><span id="statusR"></span></div>
+  </main>
+</div>
+
+<div id="lightbox" hidden>
+  <div id="lbTop">
+    <span id="lbName"></span>
+    <span id="lbMeta"></span>
+    <span class="spacer"></span>
+    <div id="lbColors" title="按 1-7 設定色標，0 清除">
+      <button class="lbsw" data-c="0" title="無色標 (0)">✕</button>
+      <button class="lbsw" data-c="1" style="background:var(--c1)" title="灰 (1)"></button>
+      <button class="lbsw" data-c="2" style="background:var(--c2)" title="綠 (2)"></button>
+      <button class="lbsw" data-c="3" style="background:var(--c3)" title="紫 (3)"></button>
+      <button class="lbsw" data-c="4" style="background:var(--c4)" title="藍 (4)"></button>
+      <button class="lbsw" data-c="5" style="background:var(--c5)" title="黃 (5)"></button>
+      <button class="lbsw" data-c="6" style="background:var(--c6)" title="紅 (6)"></button>
+      <button class="lbsw" data-c="7" style="background:var(--c7)" title="橘 (7)"></button>
+    </div>
+    <button id="lbSlide" class="tb">▶ 幻燈片</button>
+    <button id="lbClose" class="tb">✕</button>
+  </div>
+  <div id="lbStage"><img id="lbFast" alt=""><img id="lbImg" alt=""></div>
+  <button id="lbPrev" class="lb-nav">‹</button>
+  <button id="lbNext" class="lb-nav">›</button>
+</div>
+
+<div id="ctxmenu" hidden></div>
+
+<div id="modal" hidden>
+  <div id="modalBox">
+    <div id="modalTitle"></div>
+    <div id="modalBody"></div>
+    <div id="modalBtns"></div>
+  </div>
+</div>
+
+<div id="hoverpreview" hidden><img alt=""><div class="hpcap"></div></div>
+
+<div id="toast" hidden></div>
+</body>
+<script src="app.js"></script>
+</html>
