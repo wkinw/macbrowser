@@ -165,14 +165,15 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		sp := sb.FS.Join(sd, sn)
-		sameDir := sb.Kind == db.Kind && sd == db.Path
+		sameStore := sb.SameStore(db)
+		sameDir := sameStore && sd == db.Path
 		if req.Move && sameDir {
 			errs = append(errs, sn+"：來源與目的相同")
 			continue
 		}
 		if req.Move {
 			np := db.FS.Join(db.Path, sn)
-			if !existsB(db.FS, np) && sb.Kind == db.Kind {
+			if !existsB(db.FS, np) && sameStore {
 				if err := sb.FS.Rename(sp, np); err == nil {
 					s.moveSidecar(sb.FS, sb.FS.Join(sd, "._"+sn), db.FS.Join(db.Path, "._"+sn))
 					s.invalidateLabel(p)

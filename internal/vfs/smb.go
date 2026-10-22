@@ -401,12 +401,17 @@ func (f *smbFS) WriteFrom(p string, r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		_, cerr := io.Copy(file, r)
+		_, cerr := copyPlain(file, r)
 		if err := file.Close(); err != nil && cerr == nil {
 			cerr = err
 		}
 		return cerr
 	})
+}
+
+func copyPlain(dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, 1<<20)
+	return io.CopyBuffer(struct{ io.Writer }{dst}, struct{ io.Reader }{src}, buf)
 }
 
 func (f *smbFS) Mkdir(p string) error {

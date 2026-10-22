@@ -71,6 +71,21 @@ func (b *Binding) Child(name string) string {
 	return b.FS.Join(b.Path, name)
 }
 
+func (b *Binding) SameStore(o *Binding) bool {
+	if b == nil || o == nil || b.Kind != o.Kind {
+		return false
+	}
+	switch f := b.FS.(type) {
+	case *smbFS:
+		of, ok := o.FS.(*smbFS)
+		return ok && f.conn.Name == of.conn.Name
+	case localFS:
+		_, ok := o.FS.(localFS)
+		return ok
+	}
+	return false
+}
+
 type Manager struct {
 	mu    sync.RWMutex
 	conns map[string]Connection

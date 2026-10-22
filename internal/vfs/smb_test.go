@@ -1,6 +1,10 @@
 package vfs
 
-import "testing"
+import (
+	"bytes"
+	"io"
+	"testing"
+)
 
 func TestSMBPathMapping(t *testing.T) {
 	f := &smbFS{conn: Connection{Name: "nas", Host: "h", Share: "media", Base: "Photos"}}
@@ -50,5 +54,77 @@ func TestSMBSharelessMapping(t *testing.T) {
 	}
 	if got := toSMB(f.full(share, rel)); got != `dir\file.txt` {
 		t.Errorf("toSMB = %q", got)
+	}
+}
+
+func TestSameStore(t *testing.T) {
+	la := &Binding{FS: localFS{}, Path: `C:\a`, Kind: "local"}
+	lb := &Binding{FS: localFS{}, Path: `D:\b`, Kind: "local"}
+	if !la.SameStore(lb) {
+		t.Error("local bindings should share a store")
+	}
+	s1 := &Binding{FS: &smbFS{conn: Connection{Name: "nas"}}, Path: "a", Kind: "smb"}
+	s2 := &Binding{FS: &smbFS{conn: Connection{Name: "nas"}}, Path: "b", Kind: "smb"}
+	s3 := &Binding{FS: &smbFS{conn: Connection{Name: "other"}}, Path: "a", Kind: "smb"}
+	if !s1.SameStore(s2) {
+		t.Error("same SMB connection should share a store")
+	}
+	if s1.SameStore(s3) {
+		t.Error("different SMB connections must not share a store")
+	}
+	if la.SameStore(s1) || s1.SameStore(la) {
+		t.Error("local and SMB must not share a store")
+	}
+}
+
+type rfDst struct {
+	readFromCalled bool
+}
+
+func (d *rfDst) Write(p []byte) (int, error) { return len(p), nil }
+
+func (d *rfDst) ReadFrom(r io.Reader) (int64, error) {
+	d.readFromCalled = true
+	return 0, nil
+}
+
+type wtSrc struct {
+	data          []byte
+	off           int
+	writeToCalled bool
+}
+
+func (s *wtSrc) Read(p []byte) (int, error) {
+	if s.off >= len(s.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, s.data[s.off:])
+	s.off += n
+	return n, nil
+}
+
+func (s *wtSrc) WriteTo(w io.Writer) (int64, error) {
+	s.writeToCalled = true
+	return 0, nil
+}
+
+func TestCopyPlainBypassesReadFromWriteTo(t *testing.T) {
+	d := &rfDst{}
+	s := &wtSrc{data: []byte("hello")}
+	n, err := copyPlain(d, s)
+	if err != nil {
+		t.Fatalf("copyPlain: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("copied %d bytes, want 5", n)
+	}
+	if d.readFromCalled {
+		t.Error("copyPlain must not use destination ReaderFrom (server-side copy)")
+	}
+	if s.writeToCalled {
+		t.Error("copyPlain must not use source WriterTo (server-side copy)")
+	}
+	if !bytes.Equal(s.data, []byte("hello")) {
+		t.Error("source mutated")
 	}
 }
