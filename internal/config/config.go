@@ -2,10 +2,14 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
+	"macbrowser/internal/secret"
 	"macbrowser/internal/vfs"
 )
 
@@ -71,13 +75,52 @@ func Load(dir string) (*Config, error) {
 		}
 	}
 	normalizePrefs(&c.Prefs)
+	plainPasswords := false
+	for i := range c.Connections {
+		pw := c.Connections[i].Password
+		if pw == "" {
+			continue
+		}
+		if strings.HasPrefix(pw, secret.Prefix) {
+			dec, err := secret.Unprotect(pw)
+			if err != nil {
+				log.Printf("無法解密連線「%s」的密碼：%v（請重新輸入密碼）", c.Connections[i].Name, err)
+				c.Connections[i].Password = ""
+				continue
+			}
+			c.Connections[i].Password = dec
+			continue
+		}
+		plainPasswords = true
+	}
+	if plainPasswords {
+		if err := c.Save(); err != nil {
+			log.Printf("加密既有 SMB 密碼失敗：%v", err)
+		}
+	}
 	return c, nil
 }
 
 func (c *Config) Save() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	data, err := json.MarshalIndent(c, "", "  ")
+	conns := make([]vfs.Connection, len(c.Connections))
+	for i, conn := range c.Connections {
+		if conn.Password != "" && !strings.HasPrefix(conn.Password, secret.Prefix) {
+			enc, err := secret.Protect(conn.Password)
+			if err != nil {
+				return fmt.Errorf("加密連線「%s」的密碼失敗：%w", conn.Name, err)
+			}
+			conn.Password = enc
+		}
+		conns[i] = conn
+	}
+	disk := struct {
+		Connections []vfs.Connection `json:"connections"`
+		LastPath    string           `json:"lastPath"`
+		Prefs       Prefs            `json:"prefs"`
+	}{conns, c.LastPath, c.Prefs}
+	data, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}

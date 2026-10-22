@@ -25,6 +25,7 @@ are taken to the last visited folder (or a root view on first run).
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:0` | HTTP address to listen on (`:0` = random free port) |
+| `-token` | random per launch | HTTP access token; set a fixed value for LAN access |
 | `-data` | `%AppData%\macbrowser` | Folder for config and thumbnail cache |
 | `-browser` | off | Open in the default browser instead of the built-in window |
 | `-noopen` | off | Start the server only, do not open any window |
@@ -32,10 +33,15 @@ are taken to the last visited folder (or a root view on first run).
 | `-webdir` | (embedded) | Serve front-end files from a folder (development) |
 | `-debug` | off | Show a console and enable dev tools |
 
-Example: `macbrowser.exe -addr 127.0.0.1:8890 -noopen`
+Example: `macbrowser.exe -addr 127.0.0.1:8890 -token my-secret -noopen`
 
-> The server binds to `127.0.0.1` by default and has **no authentication**.
-> Do not bind it to a LAN interface (`-addr 0.0.0.0:...`) on untrusted networks.
+> The server requires an access token. A random token is generated at each launch
+> and passed to the built-in window automatically (the token is removed from the
+> address bar after login). For LAN access, pass a fixed `-token` and open
+> `http://<host>:<port>/?token=<token>` once; a session cookie is then used.
+> API clients can send `Authorization: Bearer <token>` instead. With `-noopen`,
+> the console prints the access URL including the token. The connection is plain
+> HTTP — use it only on trusted networks or through a VPN.
 
 ## 3. The window
 
@@ -195,8 +201,10 @@ Background right-click: Upload files here…, Paste, New folder…, Refresh.
 | Sort key / direction | Toolbar | name / size / modified / type, asc/desc |
 
 Preferences and connections are saved to `<data dir>\config.json`
-(`%AppData%\macbrowser\config.json` by default). SMB passwords are stored in
-plain text — treat the file like a password store.
+(`%AppData%\macbrowser\config.json` by default). SMB passwords are encrypted at
+rest with Windows DPAPI (per-user). Only the same Windows account can decrypt
+them — if you copy the file to another account or machine, re-enter the
+passwords.
 
 ## 15. Troubleshooting
 
@@ -243,6 +251,7 @@ plain text — treat the file like a password store.
 | 參數 | 預設值 | 說明 |
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:0` | HTTP 監聽位址（`:0` = 隨機可用埠） |
+| `-token` | 每次啟動隨機 | HTTP 存取權杖；固定值供區域網路存取 |
 | `-data` | `%AppData%\macbrowser` | 設定檔與縮圖快取目錄 |
 | `-browser` | 關 | 以系統預設瀏覽器開啟（不用內建視窗） |
 | `-noopen` | 關 | 只啟動伺服器，不開啟任何視窗 |
@@ -250,10 +259,13 @@ plain text — treat the file like a password store.
 | `-webdir` | （內嵌） | 從資料夾載入前端檔案（開發用） |
 | `-debug` | 關 | 顯示主控台並開啟開發者工具 |
 
-範例：`macbrowser.exe -addr 127.0.0.1:8890 -noopen`
+範例：`macbrowser.exe -addr 127.0.0.1:8890 -token my-secret -noopen`
 
-> 伺服器預設只綁定 `127.0.0.1`，且**沒有任何驗證機制**。
-> 請勿在不信任的網路上綁定對外介面（`-addr 0.0.0.0:...`）。
+> 伺服器需要存取權杖。每次啟動會隨機產生並自動傳給內建視窗（登入後網址列會
+> 移除權杖）。若要從區域網路存取，請以 `-token` 指定固定值，並開啟一次
+> `http://<主機>:<埠>/?token=<權杖>`，之後使用 session cookie；API 用戶端也可
+> 改用 `Authorization: Bearer <權杖>`。使用 `-noopen` 時，主控台會印出含權杖的
+> 存取網址。連線為一般 HTTP，請僅在可信任網路使用或透過 VPN。
 
 ## 3. 視窗介紹
 
@@ -388,7 +400,8 @@ SMB／NAS 共享存於 `._檔名` AppleDouble 側車檔。資料夾不支援評�
 | 排序欄位／方向 | 工具列 | 名稱／大小／修改日期／類型，升冪／降冪 |
 
 偏好設定與連線存於 `<資料目錄>\config.json`（預設 `%AppData%\macbrowser\config.json`）。
-SMB 密碼以**明文**儲存——請把該檔案當作密碼庫保護。
+SMB 密碼以 Windows DPAPI（依使用者帳戶）加密儲存；只有同一個 Windows 帳戶能解密。
+若將設定檔複製到其他帳戶或電腦，請重新輸入密碼。
 
 ## 15. 疑難排解
 

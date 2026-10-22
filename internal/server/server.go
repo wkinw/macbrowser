@@ -1,12 +1,17 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,10 +23,17 @@ import (
 //go:embed all:web
 var webAssets embed.FS
 
+func cookieNameForToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "mb_auth_" + hex.EncodeToString(sum[:8])
+}
+
 type Server struct {
 	cfg    *config.Config
 	thumbs *thumbs.Cache
 	webDir string
+
+	authToken string
 
 	labelMu    sync.Mutex
 	labelCache map[string]labelCacheItem
@@ -34,6 +46,72 @@ type labelCacheItem struct {
 
 func New(cfg *config.Config, tc *thumbs.Cache, webDir string) *Server {
 	return &Server{cfg: cfg, thumbs: tc, webDir: webDir, labelCache: map[string]labelCacheItem{}}
+}
+
+// SetAuthToken enables access-token authentication. An empty token disables it.
+func (s *Server) SetAuthToken(token string) {
+	s.authToken = token
+}
+
+func equalToken(a, b string) bool {
+	return len(a) == len(b) && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func bearerToken(h string) string {
+	const prefix = "bearer "
+	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return strings.TrimSpace(h[len(prefix):])
+	}
+	return ""
+}
+
+func (s *Server) denyAuth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="macbrowser"`)
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeJSONCode(w, http.StatusUnauthorized, map[string]string{"error": "需要存取權杖"})
+		return
+	}
+	http.Error(w, "需要存取權杖", http.StatusUnauthorized)
+}
+
+func (s *Server) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := s.authToken
+		if token == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if q := r.URL.Query().Get("token"); q != "" {
+			if !equalToken(q, token) {
+				s.denyAuth(w, r)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{
+				Name:     cookieNameForToken(token),
+				Value:    base64.RawURLEncoding.EncodeToString([]byte(token)),
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			})
+			u := *r.URL
+			query := u.Query()
+			query.Del("token")
+			u.RawQuery = query.Encode()
+			http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+			return
+		}
+		if c, err := r.Cookie(cookieNameForToken(token)); err == nil {
+			if raw, err := base64.RawURLEncoding.DecodeString(c.Value); err == nil && equalToken(string(raw), token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if b := bearerToken(r.Header.Get("Authorization")); b != "" && equalToken(b, token) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.denyAuth(w, r)
+	})
 }
 
 func (s *Server) Handler() http.Handler {
@@ -50,7 +128,7 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 	mux.Handle("/", http.FileServer(http.FS(sub)))
-	return mux
+	return s.auth(mux)
 }
 
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {

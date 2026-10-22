@@ -1,13 +1,17 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -62,6 +66,7 @@ func fatal(format string, args ...any) {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:0", "HTTP 服務位址")
+	token := flag.String("token", "", "HTTP 存取權杖（預設每次啟動隨機產生；固定值供區域網路存取）")
 	dataDir := flag.String("data", defaultDataDir(), "設定與快取目錄")
 	browserOnly := flag.Bool("browser", false, "使用預設瀏覽器開啟（不使用內建視窗）")
 	noOpen := flag.Bool("noopen", false, "不自動開啟視窗或瀏覽器")
@@ -80,20 +85,34 @@ func main() {
 	}
 	vfs.SetConnections(cfg.ConnectionsSnapshot())
 
+	authToken := strings.TrimSpace(*token)
+	if authToken == "" {
+		authToken, err = randomToken()
+		if err != nil {
+			fatal("無法產生存取權杖：%v", err)
+		}
+	}
+
 	tc := thumbs.New(filepath.Join(*dataDir, "thumbs"), *tileCacheMB)
-	srv := &http.Server{Handler: server.New(cfg, tc, *webDir).Handler()}
+	app := server.New(cfg, tc, *webDir)
+	app.SetAuthToken(authToken)
+	srv := &http.Server{Handler: app.Handler()}
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		fatal("無法監聽 %s：%v", *addr, err)
 	}
-	url := "http://" + ln.Addr().String()
+	baseURL := "http://" + ln.Addr().String()
+	browseURL := baseURL + "/?token=" + url.QueryEscape(authToken)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP 服務錯誤：%v", err)
 		}
 	}()
-	fmt.Printf("MacBrowser 已啟動：%s\n", url)
+	fmt.Printf("MacBrowser 已啟動：%s\n", baseURL)
 	fmt.Printf("設定目錄：%s\n", *dataDir)
+	if *noOpen {
+		fmt.Printf("存取網址（含權杖）：%s\n", browseURL)
+	}
 
 	if *noOpen {
 		select {}
@@ -112,14 +131,14 @@ func main() {
 				IconId: 32512,
 			},
 		}); w != nil {
-			w.Navigate(url)
+			w.Navigate(browseURL)
 			w.Run()
 			return
 		}
 		ensureConsole()
 		log.Printf("找不到 WebView2 執行階段，改用預設瀏覽器開啟")
 	}
-	openURL(url)
+	openURL(browseURL)
 	fmt.Println("已在瀏覽器開啟。關閉此主控台視窗即可結束程式。")
 	select {}
 }
@@ -130,6 +149,14 @@ func defaultDataDir() string {
 		cfgDir = os.TempDir()
 	}
 	return filepath.Join(cfgDir, "macbrowser")
+}
+
+func randomToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 func openURL(url string) {
