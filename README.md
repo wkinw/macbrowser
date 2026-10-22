@@ -3,6 +3,7 @@
 A Windows file browser with macOS Finder–style color labels, built with Go + WebView2.
 Browse local drives and SMB shares (NAS) in a fast tile grid, view images in a
 built-in lightbox, tag files/folders with Finder colors that stay visible on macOS,
+view 0–5 star photo ratings, see EXIF capture times on thumbnails,
 and move files between Windows Explorer and your NAS with full clipboard support.
 
 ---
@@ -44,6 +45,9 @@ Example: `macbrowser.exe -addr 127.0.0.1:8890 -noopen`
   “labels” / “hidden files” toggles.
 - **Color bar** — click a color chip to show only items with that label;
   click “All” to clear the filter. Chips combine (click several).
+- **Rating bar** — click a star-count chip (1★–5★) to show only files with that
+  rating; click “All” to clear. Chips combine. The color and rating bars apply
+  together (intersection).
 - **Grid** — tiles with thumbnails. Folder tiles show a collage of up to four
   images found inside and a folder-shaped tab tinted with the folder’s label color.
 - **Status bar** — item counts and total size; right side shows the current path
@@ -69,6 +73,10 @@ Example: `macbrowser.exe -addr 127.0.0.1:8890 -noopen`
   **80% of the screen**. It disappears when you move away, click, scroll or open
   something. Change the delay in the toolbar (“preview __ seconds”, 0.5–30 s);
   the setting is remembered. Files without a preview (non-images) show nothing.
+- **Capture time** — image tiles show the photo's EXIF capture time (date and
+  time, e.g. `2026-08-23 14:22`) as a small badge at the bottom-right corner.
+  The same time appears on the right side of the hover-preview caption. Photos
+  without EXIF time metadata show no badge.
 
 ## 6. Color labels (macOS compatible)
 
@@ -94,6 +102,19 @@ Notes:
   Windows apps simply ignore it.
 - Showing/hiding the colored dots is controlled by the “labels” checkbox in the
   toolbar.
+
+**Photo ratings (0–5 stars)** — ratings are read-only in MacBrowser. The stars
+appear in gold at the bottom-left of the tile (and in the lightbox top bar) and
+can be used with the rating bar above the grid to filter by star count. Ratings
+are read from `com.apple.metadata:kMDItemStarRating` (binary plist), the
+attribute macOS Finder uses, so ratings given on a Mac are visible here. Local
+NTFS uses a file attribute stream; SMB/NAS shares use the `._name` AppleDouble
+sidecar. Folders do not support ratings.
+
+Ratings already embedded in the photo by other apps — XMP `xmp:Rating` (what
+Windows Explorer shows as “Rating”, also written by Adobe apps) or the EXIF
+rating tag — are recognized when no macOS rating metadata exists. The image file
+is never rewritten.
 
 ## 7. Selecting
 
@@ -135,6 +156,7 @@ Notes:
 - `←` / `→` previous/next, `Home` / `End` first/last, `Space` toggles the
   slideshow, `Esc` (or the ✕) closes.
 - `1`–`7` set the color label, `0` clears it.
+- When the image has a rating, its stars are shown read-only in the top bar.
 
 ## 11. Search
 
@@ -201,6 +223,7 @@ plain text — treat the file like a password store.
 以 Go + WebView2 打造的 Windows 檔案瀏覽器，支援 macOS Finder 風格色標。
 用磚塊式縮圖格快速瀏覽本機磁碟與 SMB（NAS）共享，內建燈箱看圖，
 可為檔案／資料夾標上 Mac 看得見的 Finder 顏色標籤，
+檢視相片的 0–5 星評等、在縮圖上顯示 EXIF 拍攝時間，
 並透過完整的剪貼簿支援在 Windows 檔案總管與 NAS 之間搬移檔案。
 
 ---
@@ -238,6 +261,8 @@ plain text — treat the file like a password store.
   `smb://nas/Share` 後按 Enter）、快速篩選、深入搜尋、上傳、排序欄位與方向、
   縮圖大小滑桿、預覽延遲秒數，以及「色標」「隱藏檔」開關。
 - **顏色篩選列** — 點顏色晶片只顯示該色標項目；點「全部」清除篩選。可多選疊加。
+- **評等篩選列** — 點「1★」–「5★」晶片只顯示該星等的檔案；點「全部」清除。
+  可多選疊加；顏色與評等篩選會同時套用（交集）。
 - **方格區** — 縮圖磚。資料夾磚會顯示內部最多四張圖片的拼貼，並帶有資料夾頁籤外框，
   頁籤會染上該資料夾的色標顏色。
 - **狀態列** — 顯示項目數與總大小；右側顯示目前路徑（或剪貼簿狀態）。
@@ -258,6 +283,9 @@ plain text — treat the file like a password store.
   即彈出最大可達**螢幕 80%** 的大預覽。滑離、點擊、捲動或開啟項目時自動消失。
   秒數可在工具列「預覽 __ 秒」調整（0.5–30 秒），設定會記住。
   非圖片檔沒有預覽，不會彈出。
+- **拍攝時間** — 圖片磚右下角會顯示相片的 EXIF 拍攝時間（日期與時間，例如
+  `2026-08-23 14:22`）小標籤；停留預覽的說明列右側也會顯示同樣的時間。
+  沒有 EXIF 時間的圖片不顯示。
 
 ## 6. 顏色標籤（相容 macOS）
 
@@ -279,6 +307,16 @@ Finder tags（`com.apple.metadata:_kMDItemUserTags`）、Finder info 色旗標�
   顯示出來，可開啟「隱藏檔」管理——但刪除它們會讓該檔案在 Mac 上失去中介資料。
 - 本機 NTFS 磁碟的色標以檔案屬性資料流儲存，其他 Windows 程式會直接忽略。
 - 是否顯示磚上的色點由工具列的「色標」核取方塊控制。
+
+**相片評等（0–5 星）** — 星等在此程式中為唯讀。星星以金色顯示在磚的左下角
+（燈箱頂端也會顯示），並可用方格上方的「評等篩選列」依星等篩選。評等讀取自
+`com.apple.metadata:kMDItemStarRating`（binary plist，macOS Finder 星等使用的
+屬性），因此 Mac 上設定的星等在此看得到。本機 NTFS 存於檔案屬性資料流；
+SMB／NAS 共享存於 `._檔名` AppleDouble 側車檔。資料夾不支援評等。
+
+若相片本身已內嵌其他程式寫入的評等——XMP `xmp:Rating`（Windows 檔案總管的
+「評等」、Adobe 系列也會寫入）或 EXIF 評等標籤——在沒有 macOS 評等中介資料時
+也會被辨識。程式不會改寫圖片檔案本身。
 
 ## 7. 選取
 
@@ -312,6 +350,7 @@ Finder tags（`com.apple.metadata:_kMDItemUserTags`）、Finder info 色旗標�
 - `←`／`→` 上一張／下一張，`Home`／`End` 第一張／最後一張，
   `空白鍵` 開關自動輪播，`Esc`（或 ✕）關閉。
 - `1`–`7` 設定色標、`0` 清除。
+- 圖片有星等時，頂端會顯示唯讀星星。
 
 ## 11. 搜尋
 

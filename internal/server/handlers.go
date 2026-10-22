@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"macbrowser/internal/config"
+	"macbrowser/internal/exif"
 	"macbrowser/internal/macmeta"
 	"macbrowser/internal/thumbs"
 	"macbrowser/internal/vfs"
@@ -194,6 +195,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	labels := map[string]*vfs.Label{}
+	ratings := map[string]int{}
 	var mu sync.Mutex
 	sem := make(chan struct{}, 16)
 	var wg sync.WaitGroup
@@ -216,9 +218,22 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 			}()
 			vpath := joinVPath(p, e.Name)
 			label := s.labelFor(vpath, b, e.Name, hasAD[e.Name])
-			if label != nil {
+			rating := 0
+			if !e.Dir {
+				var found bool
+				rating, found = macmeta.ResolveRating(b.FS, b.Path, e.Name, hasAD[e.Name])
+				if !found && vfs.CanThumb(e.Name) {
+					rating = s.contentRating(b.FS, b.FS.Join(b.Path, e.Name))
+				}
+			}
+			if label != nil || rating > 0 {
 				mu.Lock()
-				labels[e.Name] = label
+				if label != nil {
+					labels[e.Name] = label
+				}
+				if rating > 0 {
+					ratings[e.Name] = rating
+				}
 				mu.Unlock()
 			}
 		}()
@@ -226,6 +241,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	writeJSON(w, map[string]any{
 		"labels":    labels,
+		"ratings":   ratings,
 		"total":     len(entries),
 		"truncated": truncated,
 	})
@@ -284,6 +300,137 @@ func (s *Server) handleSetLabels(w http.ResponseWriter, r *http.Request) {
 		updated++
 	}
 	writeJSON(w, map[string]any{"ok": len(errs) == 0, "updated": updated, "errors": errs})
+}
+
+func (s *Server) handleRatings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONCode(w, http.StatusMethodNotAllowed, map[string]string{"error": "僅支援 POST"})
+		return
+	}
+	var req struct {
+		Paths []string `json:"paths"`
+		Stars int      `json:"stars"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("請求格式錯誤：%w", err))
+		return
+	}
+	if len(req.Paths) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少 paths 參數"))
+		return
+	}
+	if len(req.Paths) > 2000 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("一次最多設定 2000 個項目"))
+		return
+	}
+	if req.Stars < 0 || req.Stars > 5 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("無效的星等 %d", req.Stars))
+		return
+	}
+	var errs []string
+	updated := 0
+	for _, p := range req.Paths {
+		if p == "" {
+			continue
+		}
+		b, err := vfs.Resolve(p)
+		if err != nil {
+			errs = append(errs, p+"："+err.Error())
+			continue
+		}
+		dir, name := s.splitBindingPath(b)
+		if name == "" {
+			errs = append(errs, p+"：無效的路徑")
+			continue
+		}
+		if st, err := b.FS.Stat(b.Path); err == nil && st.Dir {
+			errs = append(errs, name+"：資料夾不支援評等")
+			continue
+		}
+		if err := macmeta.SetRating(b.FS, dir, name, req.Stars); err != nil {
+			errs = append(errs, name+"："+err.Error())
+			continue
+		}
+		updated++
+	}
+	writeJSON(w, map[string]any{"ok": len(errs) == 0, "updated": updated, "errors": errs})
+}
+
+func (s *Server) contentRating(fs vfs.FS, path string) int {
+	f, err := fs.Open(path)
+	if err != nil {
+		return 0
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, 256<<10))
+	f.Close()
+	if err != nil {
+		return 0
+	}
+	return exif.Rating(buf)
+}
+
+func (s *Server) handlePhotoTime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONCode(w, http.StatusMethodNotAllowed, map[string]string{"error": "僅支援 POST"})
+		return
+	}
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("請求格式錯誤：%w", err))
+		return
+	}
+	if len(req.Paths) > 500 {
+		req.Paths = req.Paths[:500]
+	}
+	times := map[string]string{}
+	var mu sync.Mutex
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, p := range req.Paths {
+		if p == "" {
+			continue
+		}
+		p := p
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("phototime panic %s: %v", p, rec)
+				}
+			}()
+			b, err := vfs.Resolve(p)
+			if err != nil {
+				return
+			}
+			st, err := b.FS.Stat(b.Path)
+			if err != nil || st.Dir {
+				return
+			}
+			f, err := b.FS.Open(b.Path)
+			if err != nil {
+				return
+			}
+			buf, rerr := io.ReadAll(io.LimitReader(f, 512*1024))
+			f.Close()
+			if rerr != nil {
+				return
+			}
+			if t := exif.Taken(buf); t != "" {
+				mu.Lock()
+				times[p] = t
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	writeJSON(w, map[string]any{"times": times})
 }
 
 func (s *Server) labelFor(vpath string, b *vfs.Binding, name string, hasAD bool) *vfs.Label {

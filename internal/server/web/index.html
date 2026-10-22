@@ -49,6 +49,15 @@
       <button class="chip" data-color="6"><i class="dotc" style="background:var(--c6)"></i>紅</button>
       <button class="chip" data-color="7"><i class="dotc" style="background:var(--c7)"></i>橘</button>
     </div>
+    <div id="ratingbar">
+      <span class="lb-title">評等篩選：</span>
+      <button class="rchip" data-rating="0">全部</button>
+      <button class="rchip" data-rating="1" title="1 星">1 <span class="gst">★</span></button>
+      <button class="rchip" data-rating="2" title="2 星">2 <span class="gst">★</span></button>
+      <button class="rchip" data-rating="3" title="3 星">3 <span class="gst">★</span></button>
+      <button class="rchip" data-rating="4" title="4 星">4 <span class="gst">★</span></button>
+      <button class="rchip" data-rating="5" title="5 星">5 <span class="gst">★</span></button>
+    </div>
     <div id="gridwrap">
       <div id="grid"><div id="band" hidden></div></div>
       <div id="empty" hidden>此資料夾是空的</div>
@@ -73,6 +82,7 @@
       <button class="lbsw" data-c="6" style="background:var(--c6)" title="紅 (6)"></button>
       <button class="lbsw" data-c="7" style="background:var(--c7)" title="橘 (7)"></button>
     </div>
+    <div id="lbStars" title="評等" hidden></div>
     <button id="lbSlide" class="tb">▶ 幻燈片</button>
     <button id="lbClose" class="tb">✕</button>
   </div>
@@ -91,7 +101,7 @@
   </div>
 </div>
 
-<div id="hoverpreview" hidden><img alt=""><div class="hpcap"></div></div>
+<div id="hoverpreview" hidden><img alt=""><div class="hpcap"><span class="hpname"></span><span class="hptime"></span></div></div>
 
 <div id="toast" hidden></div>
 </body>

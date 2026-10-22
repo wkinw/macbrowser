@@ -612,3 +612,202 @@ func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func buildTIFFDateTime(t *testing.T, date string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	le := binary.LittleEndian
+	value := append([]byte(date), 0)
+	b.WriteString("II")
+	binary.Write(&b, le, uint16(42))
+	binary.Write(&b, le, uint32(8))
+	binary.Write(&b, le, uint16(1))
+	binary.Write(&b, le, uint16(0x8769))
+	binary.Write(&b, le, uint16(4))
+	binary.Write(&b, le, uint32(1))
+	binary.Write(&b, le, uint32(26))
+	binary.Write(&b, le, uint32(0))
+	binary.Write(&b, le, uint16(1))
+	binary.Write(&b, le, uint16(0x9003))
+	binary.Write(&b, le, uint16(2))
+	binary.Write(&b, le, uint32(len(value)))
+	binary.Write(&b, le, uint32(44))
+	binary.Write(&b, le, uint32(0))
+	b.Write(value)
+	return b.Bytes()
+}
+
+func writeTestJPEGWithEXIF(t *testing.T, path, date string) {
+	t.Helper()
+	writeTestJPEG(t, path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app1 := append([]byte("Exif\x00\x00"), buildTIFFDateTime(t, date)...)
+	var out bytes.Buffer
+	out.Write(raw[:2])
+	out.Write([]byte{0xFF, 0xE1})
+	var lb [2]byte
+	binary.BigEndian.PutUint16(lb[:], uint16(len(app1)+2))
+	out.Write(lb[:])
+	out.Write(app1)
+	out.Write(raw[2:])
+	if err := os.WriteFile(path, out.Bytes(), 0o666); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRatingsAPI(t *testing.T) {
+	ts, dir := newTestServer(t)
+	pic := filepath.Join(dir, "pic.jpg")
+	pic2 := filepath.Join(dir, "pic2.jpg")
+	sub := filepath.Join(dir, "sub")
+	writeTestJPEG(t, pic)
+	writeTestJPEG(t, pic2)
+	if err := os.Mkdir(sub, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(body string) (int, map[string]any) {
+		t.Helper()
+		resp, err := http.Post(ts.URL+"/api/ratings", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, out
+	}
+
+	code, out := post(`{"paths":[` + jsonStr(pic) + `,` + jsonStr(pic2) + `],"stars":3}`)
+	if code != 200 || out["ok"] != true || out["updated"] != float64(2) {
+		t.Fatalf("set ratings: code=%d out=%+v", code, out)
+	}
+
+	var lblOut struct {
+		Ratings map[string]int `json:"ratings"`
+	}
+	if code := getJSON(t, ts.URL+"/api/labels?p="+url.QueryEscape(dir), &lblOut); code != 200 {
+		t.Fatalf("labels code = %d", code)
+	}
+	if lblOut.Ratings["pic.jpg"] != 3 || lblOut.Ratings["pic2.jpg"] != 3 {
+		t.Fatalf("ratings = %+v, want 3", lblOut.Ratings)
+	}
+
+	if code, _ := post(`{"paths":[` + jsonStr(pic) + `],"stars":7}`); code != 400 {
+		t.Fatalf("stars 7 code = %d, want 400", code)
+	}
+	code, out = post(`{"paths":[` + jsonStr(sub) + `,` + jsonStr(pic) + `],"stars":2}`)
+	if code != 200 || out["updated"] != float64(1) {
+		t.Fatalf("folder rating: code=%d out=%+v", code, out)
+	}
+	if errs, _ := out["errors"].([]any); len(errs) == 0 {
+		t.Fatalf("folder should produce error: %+v", out)
+	}
+
+	code, out = post(`{"paths":[` + jsonStr(pic) + `,` + jsonStr(pic2) + `],"stars":0}`)
+	if code != 200 || out["updated"] != float64(2) {
+		t.Fatalf("clear ratings: code=%d out=%+v", code, out)
+	}
+	lblOut.Ratings = nil
+	if code := getJSON(t, ts.URL+"/api/labels?p="+url.QueryEscape(dir), &lblOut); code != 200 {
+		t.Fatalf("labels after clear = %d", code)
+	}
+	if len(lblOut.Ratings) != 0 {
+		t.Fatalf("ratings after clear = %+v", lblOut.Ratings)
+	}
+}
+
+func writeTestJPEGWithXMPRating(t *testing.T, path, rating string) {
+	t.Helper()
+	writeTestJPEG(t, path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xmp := `<?xpacket begin="` + "\xEF\xBB\xBF" + `" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+		`<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+		`<rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/">` +
+		`<xmp:Rating>` + rating + `</xmp:Rating></rdf:Description></rdf:RDF></x:xmpmeta>`
+	app1 := append([]byte("http://ns.adobe.com/xap/1.0/\x00"), []byte(xmp)...)
+	var out bytes.Buffer
+	out.Write(raw[:2])
+	out.Write([]byte{0xFF, 0xE1})
+	var lb [2]byte
+	binary.BigEndian.PutUint16(lb[:], uint16(len(app1)+2))
+	out.Write(lb[:])
+	out.Write(app1)
+	out.Write(raw[2:])
+	if err := os.WriteFile(path, out.Bytes(), 0o666); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRatingsFromXMP(t *testing.T) {
+	ts, dir := newTestServer(t)
+	pic := filepath.Join(dir, "xmp.jpg")
+	writeTestJPEGWithXMPRating(t, pic, "1")
+
+	var lblOut struct {
+		Ratings map[string]int `json:"ratings"`
+	}
+	if code := getJSON(t, ts.URL+"/api/labels?p="+url.QueryEscape(dir), &lblOut); code != 200 {
+		t.Fatalf("labels code = %d", code)
+	}
+	if lblOut.Ratings["xmp.jpg"] != 1 {
+		t.Fatalf("xmp rating = %+v, want 1", lblOut.Ratings)
+	}
+
+	resp, err := http.Post(ts.URL+"/api/ratings", "application/json", strings.NewReader(`{"paths":[`+jsonStr(pic)+`],"stars":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("clear code = %d", resp.StatusCode)
+	}
+	lblOut.Ratings = nil
+	if code := getJSON(t, ts.URL+"/api/labels?p="+url.QueryEscape(dir), &lblOut); code != 200 {
+		t.Fatalf("labels after clear = %d", code)
+	}
+	if _, ok := lblOut.Ratings["xmp.jpg"]; ok {
+		t.Fatalf("cleared XMP rating must not reappear: %+v", lblOut.Ratings)
+	}
+}
+
+func TestPhotoTimeAPI(t *testing.T) {
+	ts, dir := newTestServer(t)
+	pic := filepath.Join(dir, "pic.jpg")
+	plain := filepath.Join(dir, "plain.jpg")
+	writeTestJPEGWithEXIF(t, pic, "2026:08:23 14:22:00")
+	writeTestJPEG(t, plain)
+
+	body := `{"paths":[` + jsonStr(pic) + `,` + jsonStr(plain) + `,` + jsonStr(dir) + `]}`
+	resp, err := http.Post(ts.URL+"/api/phototime", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("phototime code = %d", resp.StatusCode)
+	}
+	var out struct {
+		Times map[string]string `json:"times"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Times[pic]; got != "2026-08-23 14:22" {
+		t.Fatalf("pic time = %q, want 2026-08-23 14:22", got)
+	}
+	if _, ok := out.Times[plain]; ok {
+		t.Fatalf("plain.jpg should have no time: %+v", out.Times)
+	}
+	if len(out.Times) != 1 {
+		t.Fatalf("times = %+v", out.Times)
+	}
+}

@@ -71,6 +71,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.handleList(w, r)
 	case "/api/labels":
 		s.handleLabels(w, r)
+	case "/api/ratings":
+		s.handleRatings(w, r)
+	case "/api/phototime":
+		s.handlePhotoTime(w, r)
 	case "/api/thumb":
 		s.handleThumb(w, r)
 	case "/api/file":

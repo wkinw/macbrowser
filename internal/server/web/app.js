@@ -17,6 +17,9 @@ const state = {
   parent: null,
   kind: 'local',
   labelMap: new Map(),
+  ratingMap: new Map(),
+  takenMap: new Map(),
+  takenPending: new Set(),
   selected: new Set(),
   anchor: -1,
   search: '',
@@ -25,6 +28,7 @@ const state = {
   roots: null,
   prefs: {tileSize:168, sortKey:'name', sortDir:'asc', showHidden:false, showLabels:true, foldersFirst:true, hoverDelay:500},
   labelFilter: new Set(),
+  ratingFilter: new Set(),
   clipboard: null,
   lightbox: {open:false, list:[], idx:0, timer:null, preloadT:null},
   navSeq: 0,
@@ -358,10 +362,11 @@ async function navigate(p, opts) {
   $('addr').value = p;
   updateNavButtons();
   state.labelMap = new Map();
+  state.ratingMap = new Map();
   refresh();
   savePrefs();
   highlightActive();
-  if (state.prefs.showLabels && p !== '') refreshLabels(p);
+  if (p !== '' && (state.prefs.showLabels || state.ratingFilter.size > 0)) refreshLabels(p);
 }
 
 function updateNavButtons() {
@@ -408,7 +413,7 @@ async function doRefresh() {
   }
   state.searchMode = false;
   refresh();
-  if (state.prefs.showLabels && p !== '') refreshLabels(p);
+  if (p !== '' && (state.prefs.showLabels || state.ratingFilter.size > 0)) refreshLabels(p);
 }
 
 async function refreshLabels(p) {
@@ -420,7 +425,13 @@ async function refreshLabels(p) {
       map.set(name, data.labels[name]);
     }
     state.labelMap = map;
+    const ratings = new Map();
+    for (const name of Object.keys(data.ratings || {})) {
+      ratings.set(name, data.ratings[name]);
+    }
+    state.ratingMap = ratings;
     if (state.labelFilter.size > 0) refresh();
+    else if (state.ratingFilter.size > 0) refresh();
     else { renderVisible(true); updateStatus(); }
   } catch (e) {
   }
@@ -450,6 +461,10 @@ function applyFilter() {
       const lbl = entryLabel(e);
       const c = lbl ? lbl.color : 0;
       if (!state.labelFilter.has(c)) return false;
+    }
+    if (state.ratingFilter.size > 0) {
+      const r = e.dir ? 0 : (state.ratingMap.get(e.name) || 0);
+      if (!state.ratingFilter.has(r)) return false;
     }
     return true;
   });
@@ -486,7 +501,7 @@ function ensurePool(count) {
   while (state.pool.length < count) {
     const el = document.createElement('div');
     el.className = 'tile';
-    el.innerHTML = `<div class="thumb-box"><i class="ftab"></i><div class="ficon"></div><img alt=""><span class="dot"></span></div><div class="cap"></div>`;
+    el.innerHTML = `<div class="thumb-box"><i class="ftab"></i><div class="ficon"></div><img alt=""><span class="dot"></span><span class="stars"></span><span class="taken"></span></div><div class="cap"></div>`;
     const img = el.querySelector('img');
     img.src = BLANK_IMG;
     img.addEventListener('load', () => {
@@ -584,6 +599,47 @@ function renderVisible(force) {
     el.hidden = false;
   }
   unlockTiles(k);
+  queueTakenTimes(i0, i1);
+}
+
+function queueTakenTimes(i0, i1) {
+  const want = [];
+  for (let i = i0; i < i1; i++) {
+    const e = state.view[i];
+    if (!e || e.dir) continue;
+    const p = entryPath(e);
+    if (state.takenMap.has(p) || state.takenPending.has(p)) continue;
+    state.takenPending.add(p);
+    want.push(p);
+  }
+  if (want.length) fetchTimes(want);
+}
+
+function fetchTimes(paths) {
+  return post('/api/phototime', {paths})
+    .then((r) => {
+      for (const p of paths) state.takenPending.delete(p);
+      for (const [p, t] of Object.entries((r && r.times) || {})) state.takenMap.set(p, t);
+      applyTaken();
+    })
+    .catch(() => {
+      for (const p of paths) state.takenPending.delete(p);
+    });
+}
+
+function applyTaken() {
+  for (const el of state.pool) {
+    if (el.hidden) continue;
+    const i = parseInt(el.dataset.i || '-1', 10);
+    const e = state.view[i];
+    if (!e || e.dir) continue;
+    const t = state.takenMap.get(entryPath(e));
+    if (!t) continue;
+    const span = el.querySelector('.taken');
+    span.textContent = t;
+    span.title = '拍攝時間 ' + t;
+    span.style.display = 'block';
+  }
 }
 
 function bind(el, i) {
@@ -606,6 +662,24 @@ function bind(el, i) {
     dot.title = names;
   } else {
     dot.style.display = 'none';
+  }
+  const stars = el.querySelector('.stars');
+  const rating = e.dir ? 0 : (state.ratingMap.get(e.name) || 0);
+  if (rating > 0) {
+    stars.textContent = '★★★★★'.slice(0, rating);
+    stars.title = rating + ' 星';
+    stars.style.display = 'block';
+  } else {
+    stars.style.display = 'none';
+  }
+  const takenEl = el.querySelector('.taken');
+  const taken = e.dir ? '' : (state.takenMap.get(entryPath(e)) || '');
+  if (taken) {
+    takenEl.textContent = taken;
+    takenEl.title = '拍攝時間 ' + taken;
+    takenEl.style.display = 'block';
+  } else {
+    takenEl.style.display = 'none';
   }
   const box = el.querySelector('.thumb-box');
   const tab = el.querySelector('.ftab');
@@ -695,10 +769,12 @@ function armHoverPreview(el) {
     if (hoverTile !== el || !$('lightbox').hidden) return;
     const hp = $('hoverpreview');
     const img = hp.querySelector('img');
-    const cap = hp.querySelector('.hpcap');
+    const nm = hp.querySelector('.hpname');
+    const tm = hp.querySelector('.hptime');
     img.onload = () => {
       if (hoverTile !== el) return;
-      cap.textContent = e.name + (e.dir || e.size == null ? '' : '　' + formatBytes(e.size));
+      nm.textContent = e.name + (e.dir || e.size == null ? '' : '　' + formatBytes(e.size));
+      tm.textContent = e.dir ? '' : (state.takenMap.get(entryPath(e)) || '');
       hp.style.visibility = 'hidden';
       hp.hidden = false;
       positionHoverPreview(el, hp);
@@ -706,6 +782,15 @@ function armHoverPreview(el) {
     };
     img.onerror = () => hideHoverPreview();
     img.src = url;
+    if (!e.dir) {
+      const p = entryPath(e);
+      if (!state.takenMap.has(p) && !state.takenPending.has(p)) {
+        state.takenPending.add(p);
+        fetchTimes([p]).then(() => {
+          if (hoverTile === el) tm.textContent = state.takenMap.get(p) || '';
+        });
+      }
+    }
   }, state.prefs.hoverDelay > 0 ? state.prefs.hoverDelay : 500);
 }
 
@@ -775,6 +860,7 @@ function updateStatus() {
     left = `${files} 個檔案、${dirs} 個資料夾`;
     if (state.search) left += `（篩選後 ${state.view.length}/${state.entries.length}）`;
     if (state.labelFilter.size > 0) left += `（色標篩選）`;
+    if (state.ratingFilter.size > 0) left += `（評等篩選）`;
   }
   const sel = state.selected.size;
   let right = formatBytes(bytes);
@@ -1204,6 +1290,16 @@ function refreshLightboxMeta() {
   for (const b of document.querySelectorAll('#lbColors .lbsw')) {
     b.classList.toggle('cur', parseInt(b.dataset.c, 10) === cur);
   }
+  const rating = state.ratingMap.get(e.name) || 0;
+  const stars = $('lbStars');
+  stars.replaceChildren();
+  for (let s = 1; s <= rating; s++) {
+    const sp = document.createElement('span');
+    sp.className = 'lbstar';
+    sp.textContent = '★';
+    stars.appendChild(sp);
+  }
+  stars.hidden = rating === 0;
 }
 
 function showLightboxImage() {
@@ -1281,7 +1377,7 @@ function lightboxKey(ev) {
   else if (ev.key === ' ') { ev.preventDefault(); toggleSlide(); }
   else if (ev.key === 'Home') { state.lightbox.idx = 0; showLightboxImage(); }
   else if (ev.key === 'End') { state.lightbox.idx = state.lightbox.list.length - 1; showLightboxImage(); }
-  else if (/^[0-7]$/.test(ev.key) && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+  else if (/^[0-7]$/.test(ev.key) && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
     const e = state.lightbox.list[state.lightbox.idx];
     if (e) setColorOn([e], parseInt(ev.key, 10));
   }
@@ -1420,6 +1516,29 @@ function wireToolbar() {
   }
   const chipAll = document.querySelector('.chip[data-color="0"]');
   if (chipAll) chipAll.classList.add('on');
+  for (const chip of document.querySelectorAll('.rchip')) {
+    chip.addEventListener('click', () => {
+      const r = parseInt(chip.dataset.rating, 10);
+      if (r === 0) {
+        state.ratingFilter.clear();
+      } else if (state.ratingFilter.has(r)) {
+        state.ratingFilter.delete(r);
+      } else {
+        state.ratingFilter.add(r);
+      }
+      for (const ch of document.querySelectorAll('.rchip')) {
+        const rr = parseInt(ch.dataset.rating, 10);
+        ch.classList.toggle('on', rr === 0 ? state.ratingFilter.size === 0 : state.ratingFilter.has(rr));
+      }
+      if (state.ratingFilter.size > 0 && state.ratingMap.size === 0 && state.path !== '') {
+        refreshLabels(state.path);
+      } else {
+        refresh();
+      }
+    });
+  }
+  const rchipAll = document.querySelector('.rchip[data-rating="0"]');
+  if (rchipAll) rchipAll.classList.add('on');
 }
 
 let bandSel = null;
