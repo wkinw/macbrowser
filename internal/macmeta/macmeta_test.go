@@ -148,11 +148,13 @@ type nopCloser struct{ *bytes.Reader }
 func (nopCloser) Close() error { return nil }
 
 type fakeFS struct {
-	xattrs      map[string][]byte
-	files       map[string][]byte
-	noXwf       bool
-	rejectColon bool
-	forceAD     bool
+	xattrs        map[string][]byte
+	files         map[string][]byte
+	noXwf         bool
+	rejectColon   bool
+	forceAD       bool
+	failWriteFile bool
+	failXattr     string
 }
 
 func (f *fakeFS) AppleDoubleSidecar() bool { return f.forceAD }
@@ -174,7 +176,7 @@ func (f *fakeFS) Open(path string) (io.ReadSeekCloser, error) {
 }
 
 func (f *fakeFS) WriteXattr(path, name string, data []byte) error {
-	if f.noXwf || (f.rejectColon && strings.Contains(name, ":")) {
+	if f.noXwf || name == f.failXattr || (f.rejectColon && strings.Contains(name, ":")) {
 		return vfs.ErrXattrNotSupported
 	}
 	f.xattrs[name+"@"+path] = data
@@ -182,6 +184,9 @@ func (f *fakeFS) WriteXattr(path, name string, data []byte) error {
 }
 
 func (f *fakeFS) WriteFile(path string, data []byte) error {
+	if f.failWriteFile {
+		return vfs.ErrXattrNotSupported
+	}
 	f.files[path] = data
 	return nil
 }
@@ -251,7 +256,7 @@ func TestBuildUserTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	ut := ParseUserTags(data)
-	if ut == nil || ut.Color != 6 || len(ut.Names) != 1 || ut.Names[0] != "Red" {
+	if ut == nil || ut.Color != 6 || len(ut.Names) != 1 || ut.Names[0] != "紅色" {
 		t.Fatalf("tags = %+v", ut)
 	}
 	data, err = BuildUserTags(0)
@@ -263,27 +268,35 @@ func TestBuildUserTags(t *testing.T) {
 	}
 }
 
-func TestSetLabelFinderInfoXattr(t *testing.T) {
-	fs := &fakeFS{xattrs: map[string][]byte{}, files: map[string][]byte{}}
+func TestSetLabelUpdatesUserTagsAndFinderInfo(t *testing.T) {
+	originalFI := make([]byte, 32)
+	originalFI[9] = 2 << 1
+	fiKey := FinderInfoAttr + "@dir|pic.jpg"
+	tagsKey := UserTagsAttr + "@dir|pic.jpg"
+	fs := &fakeFS{
+		xattrs: map[string][]byte{fiKey: append([]byte(nil), originalFI...)},
+		files:  map[string][]byte{},
+	}
 	if err := SetLabel(fs, "dir", "pic.jpg", 5); err != nil {
 		t.Fatal(err)
 	}
-	raw := fs.xattrs[FinderInfoAttr+"@dir|pic.jpg"]
-	if c := ColorFromFinderInfo(raw); c != 5 {
+	if c := ColorFromFinderInfo(fs.xattrs[fiKey]); c != 5 {
 		t.Fatalf("FinderInfo color = %d, want 5", c)
+	}
+	if ut := ParseUserTags(fs.xattrs[tagsKey]); ut == nil || ut.Color != 5 || ut.Names[0] != "黃色" {
+		t.Fatalf("UserTags = %+v, want 黃色 with color 5", ut)
 	}
 	if _, ok := fs.files["dir|._pic.jpg"]; ok {
 		t.Fatal("should not create AppleDouble when xattr works")
 	}
-	lbl := Resolve(fs, "dir", "pic.jpg", false)
-	if lbl == nil || lbl.Color != 5 {
-		t.Fatalf("resolve = %+v, want 5", lbl)
-	}
 	if err := SetLabel(fs, "dir", "pic.jpg", 0); err != nil {
 		t.Fatal(err)
 	}
-	if lbl := Resolve(fs, "dir", "pic.jpg", false); lbl != nil && lbl.Color != 0 {
-		t.Fatalf("after clear = %+v", lbl)
+	if c := ColorFromFinderInfo(fs.xattrs[fiKey]); c != 0 {
+		t.Fatalf("FinderInfo color after clear = %d, want 0", c)
+	}
+	if ut := ParseUserTags(fs.xattrs[tagsKey]); ut != nil && ut.Color != 0 {
+		t.Fatalf("UserTags after clear = %+v, want no color", ut)
 	}
 }
 
@@ -292,16 +305,37 @@ func TestSetLabelTagsRejectedWritesSidecar(t *testing.T) {
 	if err := SetLabel(fs, "dir", "pic.jpg", 6); err != nil {
 		t.Fatal(err)
 	}
-	if c := ColorFromFinderInfo(fs.xattrs[FinderInfoAttr+"@dir|pic.jpg"]); c != 6 {
-		t.Fatalf("FinderInfo color = %d, want 6", c)
-	}
 	ad := ParseAppleDouble(fs.files["dir|._pic.jpg"])
-	if ad == nil || ParseUserTags(ad.EAs[UserTagsAttr]) == nil {
+	if ad == nil || ParseUserTags(ad.EAs[UserTagsAttr]) == nil || ColorFromFinderInfo(ad.FinderInfo) != 6 {
 		t.Fatal("sidecar with tags expected when tags xattr write fails")
 	}
 	lbl := Resolve(fs, "dir", "pic.jpg", true)
 	if lbl == nil || lbl.Color != 6 {
 		t.Fatalf("resolve = %+v, want 6", lbl)
+	}
+}
+
+func TestSetLabelFinderInfoFailureWritesBothToSidecar(t *testing.T) {
+	fs := &fakeFS{
+		xattrs:    map[string][]byte{},
+		files:     map[string][]byte{},
+		failXattr: FinderInfoAttr,
+	}
+	if err := SetLabel(fs, "dir", "pic.jpg", 6); err != nil {
+		t.Fatal(err)
+	}
+	if ut := ParseUserTags(fs.xattrs[UserTagsAttr+"@dir|pic.jpg"]); ut == nil || ut.Color != 6 {
+		t.Fatalf("UserTags xattr = %+v, want color 6", ut)
+	}
+	if _, ok := fs.xattrs[FinderInfoAttr+"@dir|pic.jpg"]; ok {
+		t.Fatal("fake FinderInfo xattr failure unexpectedly succeeded")
+	}
+	ad := ParseAppleDouble(fs.files["dir|._pic.jpg"])
+	if ad == nil || ColorFromFinderInfo(ad.FinderInfo) != 6 {
+		t.Fatalf("AppleDouble FinderInfo = %+v, want color 6", ad)
+	}
+	if ut := ParseUserTags(ad.EAs[UserTagsAttr]); ut == nil || ut.Color != 6 {
+		t.Fatalf("AppleDouble UserTags = %+v, want color 6", ut)
 	}
 }
 
@@ -317,14 +351,32 @@ func TestSetLabelForcedSidecar(t *testing.T) {
 	if ad == nil {
 		t.Fatal("sidecar expected with forced AD")
 	}
-	if ut := ParseUserTags(ad.EAs[UserTagsAttr]); ut == nil || ut.Color != 3 {
+	if ColorFromFinderInfo(ad.FinderInfo) != 3 {
+		t.Fatalf("sidecar FinderInfo color = %d, want 3", ColorFromFinderInfo(ad.FinderInfo))
+	}
+	if c := ColorFromFinderInfo(ad.EAs[FinderInfoAttr]); c != 3 {
+		t.Fatalf("sidecar FinderInfo EA color = %d, want 3", c)
+	}
+	if ut := ParseUserTags(ad.EAs[UserTagsAttr]); ut == nil || ut.Color != 3 || len(ut.Names) != 1 || ut.Names[0] != "紫色" {
 		t.Fatalf("sidecar tags = %+v", ut)
+	}
+	if c := ColorFromFinderInfo(fs.xattrs[FinderInfoAttr+"@dir|pic.jpg"]); c != 3 {
+		t.Fatalf("FinderInfo xattr color = %d, want 3", c)
 	}
 	if err := SetLabel(fs, "dir", "pic.jpg", 0); err != nil {
 		t.Fatal(err)
 	}
 	if ad := ParseAppleDouble(fs.files["dir|._pic.jpg"]); ad == nil {
 		t.Fatal("sidecar should be updated on clear")
+	} else if ColorFromFinderInfo(ad.FinderInfo) != 0 {
+		t.Fatalf("cleared sidecar FinderInfo color = %d, want 0", ColorFromFinderInfo(ad.FinderInfo))
+	}
+}
+
+func TestSetLabelForcedSidecarWriteFailure(t *testing.T) {
+	fs := &fakeFS{xattrs: map[string][]byte{}, files: map[string][]byte{}, forceAD: true, failWriteFile: true}
+	if err := SetLabel(fs, "dir", "pic.jpg", 6); err == nil {
+		t.Fatal("expected an error when the Finder metadata sidecar cannot be written")
 	}
 }
 
@@ -341,8 +393,8 @@ func TestSetLabelAppleDoubleFallback(t *testing.T) {
 	if ad == nil {
 		t.Fatal("written AppleDouble unparsable")
 	}
-	if c := ColorFromFinderInfo(ad.FinderInfo); c != 6 {
-		t.Fatalf("ad FinderInfo color = %d, want 6", c)
+	if ColorFromFinderInfo(ad.FinderInfo) != 6 {
+		t.Fatalf("fallback FinderInfo color = %d, want 6", ColorFromFinderInfo(ad.FinderInfo))
 	}
 	if ut := ParseUserTags(ad.EAs[UserTagsAttr]); ut == nil || ut.Color != 6 {
 		t.Fatalf("ad tags = %+v", ut)
@@ -358,8 +410,8 @@ func TestSetLabelAppleDoubleFallback(t *testing.T) {
 	if ad == nil {
 		t.Fatal("AppleDouble removed unexpectedly")
 	}
-	if c := ColorFromFinderInfo(ad.FinderInfo); c != 0 {
-		t.Fatalf("after clear color = %d, want 0", c)
+	if ColorFromFinderInfo(ad.FinderInfo) != 0 {
+		t.Fatalf("cleared FinderInfo color = %d, want 0", ColorFromFinderInfo(ad.FinderInfo))
 	}
 	if _, ok := ad.EAs[UserTagsAttr]; ok {
 		t.Fatal("UserTags EA should be dropped on clear")
@@ -395,8 +447,8 @@ func TestSetLabelPreservesAppleDoubleExtras(t *testing.T) {
 	if ad == nil {
 		t.Fatal("AppleDouble unparsable after update")
 	}
-	if c := ColorFromFinderInfo(ad.FinderInfo); c != 3 {
-		t.Fatalf("color = %d, want 3", c)
+	if ColorFromFinderInfo(ad.FinderInfo) != 3 {
+		t.Fatalf("FinderInfo color = %d, want 3", ColorFromFinderInfo(ad.FinderInfo))
 	}
 	if ad.Comment != "my comment" {
 		t.Fatalf("comment lost: %q", ad.Comment)
@@ -422,11 +474,11 @@ func TestSetLabelExistingADUpdatedWhenXattrWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c := ColorFromFinderInfo(fs.xattrs[FinderInfoAttr+"@dir|pic.jpg"]); c != 4 {
-		t.Fatalf("xattr color = %d, want 4", c)
+		t.Fatalf("FinderInfo xattr color = %d, want 4", c)
 	}
 	ad := ParseAppleDouble(fs.files["dir|._pic.jpg"])
 	if ad == nil || ColorFromFinderInfo(ad.FinderInfo) != 4 {
-		t.Fatalf("existing AppleDouble not updated: %+v", ad)
+		t.Fatalf("existing AppleDouble not synchronized: %+v", ad)
 	}
 }
 
@@ -440,6 +492,9 @@ func TestSetLabelFolderXattrOnly(t *testing.T) {
 	}
 	if ut := ParseUserTags(fs.xattrs[UserTagsAttr+"@dir|folder"]); ut == nil || ut.Color != 2 {
 		t.Fatalf("tags = %+v", ut)
+	}
+	if c := ColorFromFinderInfo(fs.xattrs[FinderInfoAttr+"@dir|folder"]); c != 2 {
+		t.Fatalf("folder FinderInfo color = %d, want 2", c)
 	}
 	lbl := Resolve(fs, "dir", "folder", false)
 	if lbl == nil || lbl.Color != 2 {

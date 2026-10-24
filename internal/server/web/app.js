@@ -6,7 +6,7 @@ const enc = encodeURIComponent;
 const BLANK_IMG = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 
 const COLOR_HEX = {1:'var(--c1)',2:'var(--c2)',3:'var(--c3)',4:'var(--c4)',5:'var(--c5)',6:'var(--c6)',7:'var(--c7)'};
-const COLOR_NAME = {1:'灰',2:'綠',3:'紫',4:'藍',5:'黃',6:'紅',7:'橘'};
+const COLOR_NAME = {1:'灰色',2:'綠色',3:'紫色',4:'藍色',5:'黃色',6:'紅色',7:'橘色'};
 
 const state = {
   path: '',
@@ -18,6 +18,9 @@ const state = {
   kind: 'local',
   labelMap: new Map(),
   ratingMap: new Map(),
+  labelRequestSeq: 0,
+  labelRequests: 0,
+  labelPollBusy: false,
   takenMap: new Map(),
   takenPending: new Set(),
   selected: new Set(),
@@ -25,6 +28,18 @@ const state = {
   search: '',
   searchQuery: '',
   searchMode: false,
+  timelineMode: false,
+  timelineTruncated: false,
+  timelineBuildingIndex: false,
+  timelineHasMore: false,
+  timelineLoading: false,
+  timelineLoadingAll: false,
+  timelineLoadingProgress: 0,
+  timelineOffset: 0,
+  timelineTotal: 0,
+  timelineStartedAt: 0,
+  timelineTimer: null,
+  timelineAbort: null,
   roots: null,
   prefs: {tileSize:168, sortKey:'name', sortDir:'asc', showHidden:false, showLabels:true, foldersFirst:true, hoverDelay:500},
   labelFilter: new Set(),
@@ -82,7 +97,37 @@ function parentV(p) {
 }
 
 function entryPath(e) { return e.path || joinV(state.path, e.name); }
-function entryLabel(e) { return e.label || state.labelMap.get(e.name) || null; }
+function entryKey(e) { return e.path || e.name; }
+function entryLabel(e) { return e.label || (state.timelineMode ? null : state.labelMap.get(e.name)) || null; }
+function entryRating(e) { return state.timelineMode ? (e.rating || 0) : (state.ratingMap.get(e.name) || 0); }
+
+function startTimelineTimer() {
+  stopTimelineTimer();
+  state.timelineStartedAt = Date.now();
+  state.timelineTimer = setInterval(updateStatus, 1000);
+}
+
+function stopTimelineTimer() {
+  if (state.timelineTimer) clearInterval(state.timelineTimer);
+  state.timelineTimer = null;
+  state.timelineStartedAt = 0;
+}
+
+function cancelTimelineLoading() {
+  if (!state.timelineLoading) return;
+  const controller = state.timelineAbort;
+  state.timelineAbort = null;
+  if (controller) controller.abort();
+  state.navSeq++;
+  state.timelineLoading = false;
+  state.timelineLoadingAll = false;
+  state.timelineLoadingProgress = 0;
+  state.timelineBuildingIndex = false;
+  stopTimelineTimer();
+  updateTimelineButton();
+  updateStatus();
+  toast('已取消時間線載入');
+}
 
 function formatBytes(n) {
   n = n || 0;
@@ -334,6 +379,20 @@ async function navigate(p, opts) {
     state.fwd = [];
   }
   state.path = p;
+  if (state.timelineAbort) state.timelineAbort.abort();
+  state.timelineAbort = null;
+  stopTimelineTimer();
+  state.timelineMode = false;
+  state.timelineTruncated = false;
+  state.timelineLoading = false;
+  state.timelineLoadingAll = false;
+  state.timelineLoadingProgress = 0;
+  state.timelineBuildingIndex = false;
+  state.timelineHasMore = false;
+  state.timelineOffset = 0;
+  state.timelineTotal = 0;
+  updateTimelineButton();
+  updateStatus();
   state.selected.clear();
   state.anchor = -1;
   state.search = '';
@@ -396,6 +455,7 @@ function goUp() {
 }
 
 async function doRefresh() {
+  if (state.timelineMode) return loadTimeline(true);
   const p = state.path;
   const seq = ++state.navSeq;
   try {
@@ -416,28 +476,259 @@ async function doRefresh() {
   if (p !== '' && (state.prefs.showLabels || state.ratingFilter.size > 0)) refreshLabels(p);
 }
 
-async function refreshLabels(p) {
+function updateTimelineButton() {
+  const btn = $('timelineBtn');
+  if (!btn) return;
+  btn.classList.toggle('active', state.timelineMode);
+  btn.textContent = state.timelineMode ? '退出時間線' : '時間線';
+  btn.title = state.timelineMode ? '返回目前資料夾' : '按拍攝時間瀏覽目前資料夾及子資料夾中的照片';
+  btn.setAttribute('aria-pressed', state.timelineMode ? 'true' : 'false');
+  btn.disabled = !state.path || (state.timelineLoading && state.timelineBuildingIndex);
+}
+
+function clearTimelineFilters() {
+  state.search = '';
+  state.searchQuery = '';
+  $('search').value = '';
+  state.labelFilter.clear();
+  state.ratingFilter.clear();
+  for (const chip of document.querySelectorAll('.chip')) {
+    chip.classList.toggle('on', chip.dataset.color === '0');
+  }
+  for (const chip of document.querySelectorAll('.rchip')) {
+    chip.classList.toggle('on', chip.dataset.rating === '0');
+  }
+}
+
+async function loadTimeline(forceRefresh) {
+  const p = state.path;
+  const wasTimeline = state.timelineMode;
+  if (!p) { toast('請先進入資料夾，再開啟時間線', true); return; }
+  const seq = ++state.navSeq;
+  const btn = $('timelineBtn');
+  state.timelineLoading = true;
+  state.timelineLoadingAll = false;
+  state.timelineBuildingIndex = true;
+  const controller = new AbortController();
+  state.timelineAbort = controller;
+  startTimelineTimer();
+  if (btn) btn.disabled = true;
+  updateStatus();
+  toast('正在準備時間線；首次建立索引可能需要較長時間…');
   try {
-    const data = await api('/api/labels?p=' + enc(p));
-    if (state.path !== p) return;
+    const refreshParam = forceRefresh ? '&refresh=1' : '';
+    const data = await api('/api/timeline?p=' + enc(p) + '&offset=0&limit=500' + refreshParam, {signal: controller.signal});
+    if (seq !== state.navSeq || state.path !== p) return;
+    state.timelineMode = true;
+    state.timelineTruncated = !!data.truncated;
+    state.timelineHasMore = !!data.hasMore;
+    state.timelineOffset = data.nextOffset || 0;
+    state.timelineTotal = data.total || 0;
+    state.entries = data.entries || [];
+    state.selected.clear();
+    state.anchor = -1;
+    state.searchMode = false;
+    state.labelMap = new Map();
+    state.ratingMap = new Map();
+    if (!wasTimeline) clearTimelineFilters();
+    $('gridwrap').scrollTop = 0;
+    updateTimelineButton();
+    refresh();
+    const suffix = state.timelineTruncated ? '；已達掃描上限，結果可能不完整' : '';
+    toast(`時間線已就緒：共 ${state.timelineTotal.toLocaleString()} 張，已載入 ${state.entries.length.toLocaleString()} 張${suffix}`, state.timelineTruncated);
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('載入時間線失敗：' + e.message, true);
+  } finally {
+    if (seq === state.navSeq) {
+      state.timelineAbort = null;
+      state.timelineLoading = false;
+      state.timelineBuildingIndex = false;
+      stopTimelineTimer();
+      updateTimelineButton();
+      updateStatus();
+    }
+  }
+}
+
+async function loadMoreTimeline() {
+  if (!state.timelineMode || !state.timelineHasMore || state.timelineLoading) return;
+  const p = state.path;
+  const seq = state.navSeq;
+  state.timelineLoading = true;
+  state.timelineLoadingAll = false;
+  state.timelineBuildingIndex = false;
+  const controller = new AbortController();
+  state.timelineAbort = controller;
+  startTimelineTimer();
+  updateStatus();
+  try {
+    const url = `/api/timeline?p=${enc(p)}&offset=${state.timelineOffset}&limit=500`;
+    const data = await api(url, {signal: controller.signal});
+    if (seq !== state.navSeq || !state.timelineMode || state.path !== p) return;
+    state.entries = state.entries.concat(data.entries || []);
+    state.timelineOffset = data.nextOffset || state.timelineOffset;
+    state.timelineTotal = data.total || state.timelineTotal;
+    state.timelineHasMore = !!data.hasMore;
+    state.timelineTruncated = !!data.truncated;
+    refresh();
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('載入下一頁失敗：' + e.message, true);
+  } finally {
+    if (seq === state.navSeq) {
+      state.timelineAbort = null;
+      state.timelineLoading = false;
+      stopTimelineTimer();
+      updateStatus();
+    }
+  }
+}
+
+async function loadAllTimeline() {
+  if (!state.timelineMode || !state.timelineHasMore || state.timelineLoading) return;
+  const p = state.path;
+  const seq = state.navSeq;
+  let cursor = state.timelineOffset;
+  const additions = [];
+  state.timelineLoading = true;
+  state.timelineLoadingAll = true;
+  state.timelineLoadingProgress = cursor;
+  state.timelineBuildingIndex = false;
+  const controller = new AbortController();
+  state.timelineAbort = controller;
+  startTimelineTimer();
+  updateStatus();
+  try {
+    while (cursor < state.timelineTotal) {
+      const url = `/api/timeline?p=${enc(p)}&offset=${cursor}&limit=1000`;
+      const data = await api(url, {signal: controller.signal});
+      if (seq !== state.navSeq || !state.timelineMode || state.path !== p) return;
+      const entries = data.entries || [];
+      if (entries.length === 0 && data.hasMore) throw new Error('分頁沒有前進，請重試');
+      additions.push(...entries);
+      const next = Number.isFinite(data.nextOffset) ? data.nextOffset : cursor + entries.length;
+      if (next <= cursor && data.hasMore) throw new Error('分頁位置沒有前進，請重試');
+      cursor = next;
+      state.timelineLoadingProgress = cursor;
+      state.timelineTotal = data.total || state.timelineTotal;
+      state.timelineTruncated = !!data.truncated;
+      updateStatus();
+      if (!data.hasMore) break;
+    }
+    if (seq !== state.navSeq || !state.timelineMode || state.path !== p) return;
+    state.entries = state.entries.concat(additions);
+    state.timelineOffset = cursor;
+    state.timelineHasMore = false;
+    refresh();
+    toast(`已載入全部 ${state.timelineTotal.toLocaleString()} 張照片`);
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('載入全部失敗：' + e.message, true);
+  } finally {
+    if (seq === state.navSeq) {
+      state.timelineAbort = null;
+      state.timelineLoading = false;
+      state.timelineLoadingAll = false;
+      state.timelineLoadingProgress = 0;
+      stopTimelineTimer();
+      updateStatus();
+    }
+  }
+}
+
+function toggleTimeline() {
+  if (!state.timelineMode) {
+    loadTimeline(false);
+    return;
+  }
+  if (state.timelineAbort) state.timelineAbort.abort();
+  state.timelineAbort = null;
+  state.timelineMode = false;
+  state.timelineTruncated = false;
+  state.timelineHasMore = false;
+  state.timelineLoading = false;
+  state.timelineLoadingAll = false;
+  state.timelineLoadingProgress = 0;
+  state.timelineBuildingIndex = false;
+  stopTimelineTimer();
+  state.labelMap = new Map();
+  state.ratingMap = new Map();
+  state.selected.clear();
+  state.anchor = -1;
+  updateTimelineButton();
+  $('gridwrap').scrollTop = 0;
+  updateStatus();
+  doRefresh();
+}
+
+function labelMapsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [name, value] of a) {
+    const next = b.get(name);
+    if (!next || value.color !== next.color || JSON.stringify(value.tags || []) !== JSON.stringify(next.tags || [])) return false;
+  }
+  return true;
+}
+
+function ratingMapsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [name, value] of a) if (b.get(name) !== value) return false;
+  return true;
+}
+
+async function refreshLabels(p, labelsOnly = false) {
+  const requestSeq = ++state.labelRequestSeq;
+  state.labelRequests++;
+  try {
+    const data = await api('/api/labels?p=' + enc(p) + (labelsOnly ? '&labelsOnly=1' : ''));
+    if (state.path !== p || requestSeq !== state.labelRequestSeq) return;
     const map = new Map();
     for (const name of Object.keys(data.labels || {})) {
       map.set(name, data.labels[name]);
     }
+    const labelsChanged = !labelMapsEqual(state.labelMap, map);
     state.labelMap = map;
-    const ratings = new Map();
-    for (const name of Object.keys(data.ratings || {})) {
-      ratings.set(name, data.ratings[name]);
+    let ratingsChanged = false;
+    if (!labelsOnly) {
+      const ratings = new Map();
+      for (const name of Object.keys(data.ratings || {})) {
+        ratings.set(name, data.ratings[name]);
+      }
+      ratingsChanged = !ratingMapsEqual(state.ratingMap, ratings);
+      state.ratingMap = ratings;
     }
-    state.ratingMap = ratings;
-    if (state.labelFilter.size > 0) refresh();
-    else if (state.ratingFilter.size > 0) refresh();
+    if (!labelsChanged && !ratingsChanged) return;
+    if (state.labelFilter.size > 0 || state.ratingFilter.size > 0) refresh();
     else { renderVisible(true); updateStatus(); }
   } catch (e) {
+  } finally {
+    state.labelRequests--;
+  }
+}
+
+async function pollCurrentLabels() {
+  if (document.visibilityState !== 'visible' || !state.path ||
+      state.timelineMode || (!state.prefs.showLabels && state.labelFilter.size === 0)) return;
+  if (state.labelPollBusy || state.labelRequests > 0) return;
+  state.labelPollBusy = true;
+  try {
+    await refreshLabels(state.path, true);
+  } finally {
+    state.labelPollBusy = false;
   }
 }
 
 function sortView() {
+  if (state.timelineMode) {
+    const timeOf = (e) => {
+      if (e.taken) {
+        const parsed = Date.parse(e.taken.replace(' ', 'T'));
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      const mod = Date.parse(e.mod || '');
+      return Number.isNaN(mod) ? 0 : mod;
+    };
+    state.view.sort((a, b) => timeOf(b) - timeOf(a) || entryPath(a).localeCompare(entryPath(b)));
+    return;
+  }
   const key = state.prefs.sortKey;
   const dir = state.prefs.sortDir === 'asc' ? 1 : -1;
   state.view.sort((a, b) => {
@@ -463,7 +754,7 @@ function applyFilter() {
       if (!state.labelFilter.has(c)) return false;
     }
     if (state.ratingFilter.size > 0) {
-      const r = e.dir ? 0 : (state.ratingMap.get(e.name) || 0);
+      const r = e.dir ? 0 : entryRating(e);
       if (!state.ratingFilter.has(r)) return false;
     }
     return true;
@@ -493,6 +784,10 @@ function layout() {
   const rows = Math.ceil(state.view.length / state.cols);
   $('grid').style.height = (rows * th + gap) + 'px';
   $('empty').hidden = state.view.length > 0;
+  $('empty').textContent = !state.timelineMode ? '此資料夾是空的'
+    : state.timelineTotal === 0 ? '目前資料夾樹中沒有可瀏覽的照片'
+      : state.timelineHasMore ? '目前頁面沒有符合條件的照片；可以載入更多'
+        : '目前已載入的照片中沒有符合篩選條件的項目';
   renderVisible(true);
 }
 
@@ -539,9 +834,9 @@ function ensurePool(count) {
       ev.preventDefault();
       const i = parseInt(el.dataset.i || '-1', 10);
       if (i < 0) return;
-      if (!state.selected.has(state.view[i].name)) {
+      if (!state.selected.has(entryKey(state.view[i]))) {
         state.selected.clear();
-        state.selected.add(state.view[i].name);
+        state.selected.add(entryKey(state.view[i]));
         state.anchor = i;
         renderVisible(true);
         updateStatus();
@@ -608,7 +903,7 @@ function queueTakenTimes(i0, i1) {
     const e = state.view[i];
     if (!e || e.dir) continue;
     const p = entryPath(e);
-    if (state.takenMap.has(p) || state.takenPending.has(p)) continue;
+    if (e.timeChecked || e.taken || state.takenMap.has(p) || state.takenPending.has(p)) continue;
     state.takenPending.add(p);
     want.push(p);
   }
@@ -633,7 +928,7 @@ function applyTaken() {
     const i = parseInt(el.dataset.i || '-1', 10);
     const e = state.view[i];
     if (!e || e.dir) continue;
-    const t = state.takenMap.get(entryPath(e));
+    const t = e.taken || state.takenMap.get(entryPath(e));
     if (!t) continue;
     const span = el.querySelector('.taken');
     span.textContent = t;
@@ -650,8 +945,8 @@ function bind(el, i) {
   const cap = el.querySelector('.cap');
   const dot = el.querySelector('.dot');
   cap.textContent = e.name;
-  cap.title = e.name;
-  el.classList.toggle('sel', state.selected.has(e.name));
+  cap.title = state.timelineMode ? entryPath(e) : e.name;
+  el.classList.toggle('sel', state.selected.has(entryKey(e)));
   el.classList.toggle('cut', isCut(e));
   const lbl = entryLabel(e);
   const color = lbl ? lbl.color : 0;
@@ -664,7 +959,7 @@ function bind(el, i) {
     dot.style.display = 'none';
   }
   const stars = el.querySelector('.stars');
-  const rating = e.dir ? 0 : (state.ratingMap.get(e.name) || 0);
+  const rating = e.dir ? 0 : entryRating(e);
   if (rating > 0) {
     stars.textContent = '★★★★★'.slice(0, rating);
     stars.title = rating + ' 星';
@@ -673,7 +968,7 @@ function bind(el, i) {
     stars.style.display = 'none';
   }
   const takenEl = el.querySelector('.taken');
-  const taken = e.dir ? '' : (state.takenMap.get(entryPath(e)) || '');
+  const taken = e.dir ? '' : (e.taken || state.takenMap.get(entryPath(e)) || '');
   if (taken) {
     takenEl.textContent = taken;
     takenEl.title = '拍攝時間 ' + taken;
@@ -815,14 +1110,14 @@ function onTileClick(ev, idx) {
     const a = Math.min(state.anchor, idx);
     const b = Math.max(state.anchor, idx);
     if (!ev.ctrlKey) state.selected.clear();
-    for (let i = a; i <= b; i++) state.selected.add(state.view[i].name);
+    for (let i = a; i <= b; i++) state.selected.add(entryKey(state.view[i]));
   } else if (ev.ctrlKey) {
-    if (state.selected.has(e.name)) state.selected.delete(e.name);
-    else state.selected.add(e.name);
+    if (state.selected.has(entryKey(e))) state.selected.delete(entryKey(e));
+    else state.selected.add(entryKey(e));
     state.anchor = idx;
   } else {
     state.selected.clear();
-    state.selected.add(e.name);
+    state.selected.add(entryKey(e));
     state.anchor = idx;
   }
   renderVisible(true);
@@ -854,7 +1149,10 @@ function updateStatus() {
     else { files++; bytes += e.size || 0; }
   }
   let left;
-  if (state.searchMode) {
+  if (state.timelineMode) {
+    left = `時間線：已載入 ${state.entries.length.toLocaleString()}/${state.timelineTotal.toLocaleString()} 張；目前顯示 ${state.view.length.toLocaleString()}`;
+    if (state.timelineTruncated) left += '（已達掃描上限）';
+  } else if (state.searchMode) {
     left = `搜尋「${state.searchQuery}」：${state.view.length} 項`;
   } else {
     left = `${files} 個檔案、${dirs} 個資料夾`;
@@ -862,11 +1160,46 @@ function updateStatus() {
     if (state.labelFilter.size > 0) left += `（色標篩選）`;
     if (state.ratingFilter.size > 0) left += `（評等篩選）`;
   }
+  const seconds = state.timelineStartedAt
+    ? Math.max(0, Math.floor((Date.now() - state.timelineStartedAt) / 1000)) : 0;
+  const elapsed = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  if (state.timelineLoading) {
+    const progress = state.timelineLoadingAll
+      ? `正在載入全部照片 ${state.timelineLoadingProgress.toLocaleString()}/${state.timelineTotal.toLocaleString()}`
+      : state.timelineBuildingIndex
+        ? '正在掃描照片並建立時間線索引…首次掃描可能需要一些時間'
+        : '正在載入下一批照片…';
+    left = `${progress}（已用時 ${elapsed}）`;
+  }
   const sel = state.selected.size;
   let right = formatBytes(bytes);
   if (sel > 0) right = `已選 ${sel} 項　|　` + right;
+  if (state.timelineLoading) right = state.timelineBuildingIndex ? '完成後會顯示相片總數' : '請稍候';
+  $('status').classList.toggle('loading', state.timelineLoading);
+  const showOverlay = state.timelineLoading && (state.timelineBuildingIndex || state.timelineLoadingAll);
+  $('timelineLoadingOverlay').hidden = !showOverlay;
+  $('timelineLoadingTitle').textContent = state.timelineLoadingAll ? '正在載入全部照片' : '正在建立時間線索引';
+  $('timelineLoadingMessage').textContent = state.timelineLoadingAll
+    ? `正在逐批載入照片：${state.timelineLoadingProgress.toLocaleString()} / ${state.timelineTotal.toLocaleString()} 張`
+    : '正在掃描照片拍攝時間，首次建立可能需要一些時間。';
+  const progress = $('timelineProgress');
+  progress.classList.toggle('indeterminate', state.timelineBuildingIndex);
+  const pct = state.timelineTotal > 0
+    ? Math.min(100, Math.max(0, state.timelineLoadingProgress / state.timelineTotal * 100)) : 0;
+  $('timelineProgressBar').style.width = state.timelineBuildingIndex ? '38%' : `${pct}%`;
+  $('timelineElapsed').textContent = '已用時 ' + elapsed;
+  $('timelineCancelOverlay').hidden = !showOverlay;
+  $('timelineCancel').hidden = !state.timelineLoading || showOverlay;
   $('statusL').textContent = left;
   $('statusR').textContent = right;
+  const more = $('timelineMore');
+  more.hidden = !state.timelineMode || !state.timelineHasMore;
+  more.disabled = state.timelineLoading;
+  more.textContent = state.timelineLoading ? '載入中…' : `載入更多（${Math.min(500, state.timelineTotal - state.timelineOffset)} 張）`;
+  const all = $('timelineAll');
+  all.hidden = !state.timelineMode || !state.timelineHasMore;
+  all.disabled = state.timelineLoading;
+  all.textContent = state.timelineLoadingAll ? '載入全部中…' : `載入全部（${Math.max(0, state.timelineTotal - state.timelineOffset).toLocaleString()} 張）`;
 }
 
 function moveSel(e, key) {
@@ -876,7 +1209,7 @@ function moveSel(e, key) {
   let idx = state.anchor >= 0 ? state.anchor : 0;
   if (state.anchor < 0) {
     state.selected.clear();
-    state.selected.add(state.view[0].name);
+    state.selected.add(entryKey(state.view[0]));
     state.anchor = 0;
     ensureVisible(0);
     renderVisible(true);
@@ -891,7 +1224,7 @@ function moveSel(e, key) {
   if (idx >= n) idx = n - 1;
   state.anchor = idx;
   state.selected.clear();
-  state.selected.add(state.view[idx].name);
+  state.selected.add(entryKey(state.view[idx]));
   ensureVisible(idx);
   renderVisible(true);
   updateStatus();
@@ -925,8 +1258,8 @@ function colorRow(entry) {
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
       hideCtx();
-      const targets = (entry && state.selected.has(entry.name))
-        ? state.view.filter((x) => state.selected.has(x.name))
+      const targets = (entry && state.selected.has(entryKey(entry)))
+        ? state.view.filter((x) => state.selected.has(entryKey(x)))
         : [entry];
       setColorOn(targets, c);
     });
@@ -946,9 +1279,12 @@ async function setColorOn(targets, color) {
     for (const e of list) {
       if (color > 0) {
         const old = entryLabel(e);
-        state.labelMap.set(e.name, {color, tags: (old && old.tags) || undefined});
+        const label = {color, tags: (old && old.tags) || undefined};
+        state.labelMap.set(e.name, label);
+        if (state.timelineMode) e.label = label;
       } else {
         state.labelMap.delete(e.name);
+        if (state.timelineMode) e.label = null;
       }
     }
     if (r && r.errors && r.errors.length) {
@@ -969,7 +1305,7 @@ function isCut(e) {
 }
 
 function selEntries() {
-  return state.view.filter((x) => state.selected.has(x.name));
+  return state.view.filter((x) => state.selected.has(entryKey(x)));
 }
 
 function copySel(cut) {
@@ -1202,7 +1538,7 @@ function hideCtx() { $('ctxmenu').hidden = true; }
 function renameSelected() {
   const names = [...state.selected];
   if (names.length !== 1) { toast('請先選擇單一項目', true); return; }
-  const e = state.view.find((x) => x.name === names[0]);
+  const e = state.view.find((x) => entryKey(x) === names[0]);
   if (!e) return;
   const p = entryPath(e);
   formModal('重新命名', '新名稱', e.name, async (val) => {
@@ -1214,7 +1550,7 @@ function renameSelected() {
 }
 
 function deleteSelected() {
-  const list = state.view.filter((x) => state.selected.has(x.name));
+  const list = state.view.filter((x) => state.selected.has(entryKey(x)));
   if (!list.length) { toast('請先選擇要刪除的項目', true); return; }
   const paths = list.map(entryPath);
   const sample = list.slice(0, 15).map((x) => escapeHtml(x.name)).join('<br>');
@@ -1239,6 +1575,11 @@ function newFolder() {
 }
 
 async function deepFind() {
+  if (state.timelineMode) {
+    state.timelineMode = false;
+    state.timelineTruncated = false;
+    updateTimelineButton();
+  }
   const q = $('search').value.trim();
   if (!q) { toast('請先在上方篩選框輸入關鍵字', true); return; }
   if (state.path === '') { toast('請先進入資料夾', true); return; }
@@ -1290,7 +1631,7 @@ function refreshLightboxMeta() {
   for (const b of document.querySelectorAll('#lbColors .lbsw')) {
     b.classList.toggle('cur', parseInt(b.dataset.c, 10) === cur);
   }
-  const rating = state.ratingMap.get(e.name) || 0;
+  const rating = entryRating(e);
   const stars = $('lbStars');
   stars.replaceChildren();
   for (let s = 1; s <= rating; s++) {
@@ -1319,8 +1660,9 @@ function showLightboxImage() {
   }
   const img = $('lbImg');
   img.classList.remove('zoom', 'ready');
-  img.src = '/api/file?p=' + enc(entryPath(e));
   const stage = $('lbStage');
+  stage.classList.remove('zoomed', 'dragging');
+  img.src = '/api/file?p=' + enc(entryPath(e));
   stage.scrollTop = 0;
   stage.scrollLeft = 0;
 }
@@ -1384,6 +1726,7 @@ function lightboxKey(ev) {
 }
 
 let lbDrag = null;
+let lbSuppressClick = false;
 function wireLightbox() {
   $('lbPrev').addEventListener('click', (ev) => { ev.stopPropagation(); stopSlide(); lbStep(-1); });
   $('lbNext').addEventListener('click', (ev) => { ev.stopPropagation(); stopSlide(); lbStep(1); });
@@ -1414,22 +1757,66 @@ function wireLightbox() {
     if (lb.open) $('lbMeta').textContent += '　（無法載入原圖）';
   });
   $('lbStage').addEventListener('click', (ev) => {
+    if (lbSuppressClick) {
+      lbSuppressClick = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
     if (ev.target === $('lbImg') || ev.target === $('lbStage')) {
-      $('lbImg').classList.toggle('zoom');
+      const img = $('lbImg');
+      const stage = $('lbStage');
+      const zoom = !img.classList.contains('zoom');
+      if (zoom) {
+        const ir = img.getBoundingClientRect();
+        const sr = stage.getBoundingClientRect();
+        const rx = ev.target === img && ir.width ? Math.max(0, Math.min(1, (ev.clientX - ir.left) / ir.width)) : 0.5;
+        const ry = ev.target === img && ir.height ? Math.max(0, Math.min(1, (ev.clientY - ir.top) / ir.height)) : 0.5;
+        const vx = ev.target === img ? ev.clientX - sr.left : sr.width / 2;
+        const vy = ev.target === img ? ev.clientY - sr.top : sr.height / 2;
+        img.classList.add('zoom');
+        stage.classList.add('zoomed');
+        requestAnimationFrame(() => {
+          stage.scrollLeft = Math.max(0, Math.min(stage.scrollWidth - stage.clientWidth, rx * img.naturalWidth - vx));
+          stage.scrollTop = Math.max(0, Math.min(stage.scrollHeight - stage.clientHeight, ry * img.naturalHeight - vy));
+        });
+      } else {
+        img.classList.remove('zoom');
+        stage.classList.remove('zoomed');
+        stage.scrollLeft = 0;
+        stage.scrollTop = 0;
+      }
     }
   });
-  $('lbStage').addEventListener('mousedown', (ev) => {
-    if (!$('lbImg').classList.contains('zoom')) return;
-    lbDrag = {x: ev.clientX, y: ev.clientY, sl: $('lbStage').scrollLeft, st: $('lbStage').scrollTop};
+  $('lbStage').addEventListener('pointerdown', (ev) => {
+    if (!$('lbImg').classList.contains('zoom') || ev.button !== 0) return;
+    const stage = $('lbStage');
+    lbDrag = {id: ev.pointerId, x: ev.clientX, y: ev.clientY, sl: stage.scrollLeft, st: stage.scrollTop, moved: false};
+    stage.setPointerCapture(ev.pointerId);
     ev.preventDefault();
   });
-  window.addEventListener('mousemove', (ev) => {
+  $('lbStage').addEventListener('pointermove', (ev) => {
     if (!lbDrag) return;
     const stage = $('lbStage');
+    if (Math.abs(ev.clientX - lbDrag.x) + Math.abs(ev.clientY - lbDrag.y) > 3) lbDrag.moved = true;
+    if (!lbDrag.moved) return;
+    stage.classList.add('dragging');
     stage.scrollLeft = lbDrag.sl - (ev.clientX - lbDrag.x);
     stage.scrollTop = lbDrag.st - (ev.clientY - lbDrag.y);
+    ev.preventDefault();
   });
-  window.addEventListener('mouseup', () => { lbDrag = null; });
+  const endPan = (ev) => {
+    if (!lbDrag || (ev && ev.pointerId !== lbDrag.id)) return;
+    const stage = $('lbStage');
+    if (lbDrag.moved) {
+      lbSuppressClick = true;
+      setTimeout(() => { lbSuppressClick = false; }, 0);
+    }
+    stage.classList.remove('dragging');
+    lbDrag = null;
+  };
+  $('lbStage').addEventListener('pointerup', endPan);
+  $('lbStage').addEventListener('pointercancel', endPan);
   $('lightbox').addEventListener('click', (ev) => {
     if (ev.target === $('lightbox')) closeLightbox();
   });
@@ -1454,6 +1841,11 @@ function wireToolbar() {
     refresh();
   });
   $('findBtn').addEventListener('click', deepFind);
+  $('timelineBtn').addEventListener('click', toggleTimeline);
+  $('timelineMore').addEventListener('click', loadMoreTimeline);
+  $('timelineAll').addEventListener('click', loadAllTimeline);
+  $('timelineCancel').addEventListener('click', cancelTimelineLoading);
+  $('timelineCancelOverlay').addEventListener('click', cancelTimelineLoading);
   $('uploadBtn').addEventListener('click', () => {
     if (!state.path) { toast('請先進入資料夾', true); return; }
     $('fileInput').click();
@@ -1569,7 +1961,7 @@ function drawBand(ev) {
       if (i >= state.view.length) break;
       const tx = gap + c * (tw + gap), ty = gap + r * th;
       if (tx < x + w && tx + tw > x && ty < y + h && ty + th > y) {
-        state.selected.add(state.view[i].name);
+        state.selected.add(entryKey(state.view[i]));
       }
     }
   }
@@ -1578,6 +1970,12 @@ function drawBand(ev) {
 }
 
 function wireGlobal() {
+  document.addEventListener('wheel', (ev) => {
+    // Chromium reports trackpad pinch-to-zoom as a Ctrl+wheel event too.
+    if (!ev.ctrlKey) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+  }, {capture: true, passive: false});
   document.addEventListener('click', (ev) => {
     if (!ev.target.closest('#ctxmenu')) hideCtx();
   });
@@ -1662,6 +2060,13 @@ function wireGlobal() {
     handleDrop(ev.dataTransfer, dest);
   });
   document.addEventListener('keydown', (ev) => {
+    const zoomKey = ev.key === '+' || ev.key === '=' || ev.key === '-' || ev.key === '_'
+      || ev.code === 'NumpadAdd' || ev.code === 'NumpadSubtract';
+    if (ev.ctrlKey && !ev.altKey && !ev.metaKey && zoomKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
     if (!$('lightbox').hidden) { lightboxKey(ev); return; }
     if (!$('modal').hidden) {
       if (ev.key === 'Escape') closeModal();
@@ -1688,7 +2093,7 @@ function wireGlobal() {
     }
     if (ev.ctrlKey && (ev.key === 'a' || ev.key === 'A')) {
       ev.preventDefault();
-      for (const x of state.view) state.selected.add(x.name);
+      for (const x of state.view) state.selected.add(entryKey(x));
       renderVisible(true);
       updateStatus();
       return;
@@ -1729,6 +2134,11 @@ async function init() {
 wireToolbar();
 wireLightbox();
 wireGlobal();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pollCurrentLabels();
+});
+window.addEventListener('focus', pollCurrentLabels);
+window.setInterval(pollCurrentLabels, 5000);
 init();
 
 })();

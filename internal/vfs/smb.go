@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -324,12 +325,38 @@ func smbStreamSuffixes(name string) []string {
 	return out
 }
 
-func (f *smbFS) Xattr(p, name string) ([]byte, error) {
-	share, rel := f.split(p)
-	if share == "" {
-		return nil, ErrXattrNotSupported
+const (
+	smbFinderInfoAttr = "com.apple.FinderInfo"
+	smbAFPInfoStream  = "AFP_AfpInfo"
+	smbAFPInfoSize    = 60
+	smbAFPInfoOffset  = 16
+)
+
+func finderInfoFromAFPInfo(data []byte) ([]byte, bool) {
+	if len(data) < smbAFPInfoOffset+32 {
+		return nil, false
 	}
-	full := toSMB(f.full(share, rel))
+	return append([]byte(nil), data[smbAFPInfoOffset:smbAFPInfoOffset+32]...), true
+}
+
+func afpInfoWithFinderInfo(existing, finderInfo []byte) ([]byte, error) {
+	if len(finderInfo) != 32 {
+		return nil, fmt.Errorf("FinderInfo 長度必須為 32 bytes，收到 %d", len(finderInfo))
+	}
+	out := make([]byte, smbAFPInfoSize)
+	if len(existing) >= smbAFPInfoOffset+32 {
+		copy(out, existing)
+	} else {
+		// AFP_AfpInfo layout from Samba MacExtensions.h / afpinfo.c.
+		binary.LittleEndian.PutUint32(out[0:4], 0x41465000)   // AFP signature
+		binary.LittleEndian.PutUint32(out[4:8], 0x00000100)   // version
+		binary.LittleEndian.PutUint32(out[12:16], 0x80000000) // backup-time sentinel
+	}
+	copy(out[smbAFPInfoOffset:smbAFPInfoOffset+32], finderInfo)
+	return out, nil
+}
+
+func (f *smbFS) readNamedStream(share, full, name string) ([]byte, error) {
 	var data []byte
 	err := f.run(share, func(sh *smb2.Share) error {
 		var last error = ErrXattrNotSupported
@@ -354,37 +381,66 @@ func (f *smbFS) Xattr(p, name string) ([]byte, error) {
 	return data, nil
 }
 
-func (f *smbFS) WriteXattr(p, name string, data []byte) error {
-	share, rel := f.split(p)
-	if share == "" {
-		return ErrXattrNotSupported
-	}
-	full := toSMB(f.full(share, rel))
+func (f *smbFS) writeNamedStream(share, full, name string, data []byte) error {
 	var last error = ErrXattrNotSupported
-	ok := false
 	for _, suffix := range smbStreamSuffixes(name) {
 		err := f.run(share, func(sh *smb2.Share) error {
 			file, err := sh.OpenFile(full+suffix, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 			if err != nil {
 				return err
 			}
-			_, werr := file.Write(data)
+			n, werr := file.Write(data)
 			cerr := file.Close()
 			if werr != nil {
 				return werr
 			}
+			if n != len(data) {
+				return io.ErrShortWrite
+			}
 			return cerr
 		})
 		if err == nil {
-			ok = true
-		} else {
-			last = err
+			return nil
 		}
-	}
-	if ok {
-		return nil
+		last = err
 	}
 	return last
+}
+
+func (f *smbFS) Xattr(p, name string) ([]byte, error) {
+	share, rel := f.split(p)
+	if share == "" {
+		return nil, ErrXattrNotSupported
+	}
+	full := toSMB(f.full(share, rel))
+	if name == smbFinderInfoAttr {
+		if data, err := f.readNamedStream(share, full, smbAFPInfoStream); err == nil {
+			if fi, ok := finderInfoFromAFPInfo(data); ok {
+				return fi, nil
+			}
+		}
+	}
+	return f.readNamedStream(share, full, name)
+}
+
+func (f *smbFS) WriteXattr(p, name string, data []byte) error {
+	share, rel := f.split(p)
+	if share == "" {
+		return ErrXattrNotSupported
+	}
+	full := toSMB(f.full(share, rel))
+	if name == smbFinderInfoAttr {
+		var existing []byte
+		if raw, err := f.readNamedStream(share, full, smbAFPInfoStream); err == nil {
+			existing = raw
+		}
+		wrapped, err := afpInfoWithFinderInfo(existing, data)
+		if err != nil {
+			return err
+		}
+		return f.writeNamedStream(share, full, smbAFPInfoStream, wrapped)
+	}
+	return f.writeNamedStream(share, full, name, data)
 }
 
 func (f *smbFS) WriteFile(p string, data []byte) error {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,6 +174,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.URL.Query().Get("p")
+	labelsOnly := r.URL.Query().Get("labelsOnly") == "1"
 	b, err := vfs.Resolve(p)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -219,7 +222,7 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 			vpath := joinVPath(p, e.Name)
 			label := s.labelFor(vpath, b, e.Name, hasAD[e.Name])
 			rating := 0
-			if !e.Dir {
+			if !labelsOnly && !e.Dir {
 				var found bool
 				rating, found = macmeta.ResolveRating(b.FS, b.Path, e.Name, hasAD[e.Name])
 				if !found && vfs.CanThumb(e.Name) {
@@ -660,6 +663,305 @@ func (s *Server) handleFind(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"entries": results, "scanned": scanned})
+}
+
+type timelinePhoto struct {
+	vfs.Entry
+	Taken       string `json:"taken,omitempty"`
+	TimeChecked bool   `json:"timeChecked,omitempty"`
+	Rating      int    `json:"rating,omitempty"`
+	parent      string
+	native      string
+	hasAD       bool
+}
+
+func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	root := q.Get("p")
+	b, err := vfs.Resolve(root)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	ctx := r.Context()
+	index, indexErr := s.getTimelineIndex(root, b, q.Get("refresh") == "1", ctx)
+	if indexErr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, indexErr)
+		return
+	}
+	start := offset
+	if start > len(index.photos) {
+		start = len(index.photos)
+	}
+	end := start + limit
+	if end > len(index.photos) {
+		end = len(index.photos)
+	}
+	page := append([]timelinePhoto(nil), index.photos[start:end]...)
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i := range page {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("timeline page metadata panic %s: %v", page[i].Path, rec)
+				}
+				<-sem
+				wg.Done()
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			photo := &page[i]
+			photo.Label = s.labelFor(photo.Path, bindingAt(b, photo.parent), photo.Name, photo.hasAD)
+			if rating, found := macmeta.ResolveRating(b.FS, photo.parent, photo.Name, photo.hasAD); found {
+				photo.Rating = rating
+			}
+		}(i)
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return
+	}
+	writeJSON(w, map[string]any{
+		"entries":    page,
+		"offset":     start,
+		"nextOffset": end,
+		"total":      len(index.photos),
+		"hasMore":    end < len(index.photos),
+		"scanned":    index.scanned,
+		"truncated":  index.truncated,
+	})
+}
+
+func (s *Server) getTimelineIndex(root string, b *vfs.Binding, force bool, ctx context.Context) (timelineIndex, error) {
+	const cacheTTL = 10 * time.Minute
+	for {
+		now := time.Now()
+		s.timelineMu.Lock()
+		cached, ok := s.timelineCache[root]
+		if ok && now.Sub(cached.at) < cacheTTL && !force {
+			cached.at = now
+			s.timelineCache[root] = cached
+			s.timelineMu.Unlock()
+			return cached, nil
+		}
+		if wait, building := s.timelineBuild[root]; building {
+			s.timelineMu.Unlock()
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return timelineIndex{}, ctx.Err()
+			}
+			continue
+		}
+		wait := make(chan struct{})
+		s.timelineBuild[root] = wait
+		s.timelineMu.Unlock()
+
+		index, scanErr := s.scanTimeline(root, b, ctx)
+		if scanErr != nil {
+			s.timelineMu.Lock()
+			delete(s.timelineBuild, root)
+			close(wait)
+			s.timelineMu.Unlock()
+			return timelineIndex{}, scanErr
+		}
+		index.at = time.Now()
+		s.timelineMu.Lock()
+		for key, entry := range s.timelineCache {
+			if time.Since(entry.at) >= cacheTTL {
+				delete(s.timelineCache, key)
+			}
+		}
+		if _, exists := s.timelineCache[root]; !exists && len(s.timelineCache) >= 3 {
+			oldestKey := ""
+			var oldest time.Time
+			for key, entry := range s.timelineCache {
+				if oldestKey == "" || entry.at.Before(oldest) {
+					oldestKey, oldest = key, entry.at
+				}
+			}
+			delete(s.timelineCache, oldestKey)
+		}
+		s.timelineCache[root] = index
+		delete(s.timelineBuild, root)
+		close(wait)
+		s.timelineMu.Unlock()
+		return index, nil
+	}
+}
+
+func (s *Server) scanTimeline(root string, b *vfs.Binding, ctx context.Context) (timelineIndex, error) {
+	type folder struct {
+		vpath string
+		npath string
+		depth int
+	}
+	const maxDepth = 32
+	const maxScan = 300000
+	const maxPhotos = 50000
+	stack := []folder{{vpath: root, npath: b.Path}}
+	photos := make([]timelinePhoto, 0, 512)
+	scanned := 0
+	truncated := false
+	for len(stack) > 0 {
+		if err := ctx.Err(); err != nil {
+			return timelineIndex{}, err
+		}
+		if scanned >= maxScan || len(photos) >= maxPhotos {
+			truncated = true
+			break
+		}
+		last := len(stack) - 1
+		current := stack[last]
+		stack = stack[:last]
+		entries, listErr := b.FS.List(current.npath)
+		if err := ctx.Err(); err != nil {
+			return timelineIndex{}, err
+		}
+		if listErr != nil {
+			truncated = true
+			continue
+		}
+		hasAD := make(map[string]bool)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name, "._") {
+				hasAD[strings.TrimPrefix(e.Name, "._")] = true
+			}
+		}
+		for _, e := range entries {
+			if err := ctx.Err(); err != nil {
+				return timelineIndex{}, err
+			}
+			scanned++
+			if strings.HasPrefix(e.Name, "._") || e.Name == ".DS_Store" {
+				continue
+			}
+			if e.Dir {
+				if !e.Hidden && current.depth < maxDepth {
+					stack = append(stack, folder{
+						vpath: joinVPath(current.vpath, e.Name),
+						npath: b.FS.Join(current.npath, e.Name),
+						depth: current.depth + 1,
+					})
+				} else if !e.Hidden {
+					truncated = true
+				}
+				continue
+			}
+			if !vfs.CanThumb(e.Name) {
+				continue
+			}
+			e.Path = joinVPath(current.vpath, e.Name)
+			e.Thumb = true
+			photos = append(photos, timelinePhoto{
+				Entry:       e,
+				TimeChecked: true,
+				parent:      current.npath,
+				native:      b.FS.Join(current.npath, e.Name),
+				hasAD:       hasAD[e.Name],
+			})
+			if len(photos) >= maxPhotos || scanned >= maxScan {
+				truncated = true
+				break
+			}
+		}
+	}
+	if len(stack) > 0 || scanned >= maxScan {
+		truncated = true
+	}
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i := range photos {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return timelineIndex{}, ctx.Err()
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("timeline metadata panic %s: %v", photos[i].Path, rec)
+				}
+				<-sem
+				wg.Done()
+			}()
+			if ctx.Err() != nil {
+				return
+			}
+			photo := &photos[i]
+			ext := strings.ToLower(filepath.Ext(photo.Name))
+			if ext != ".jpg" && ext != ".jpeg" && ext != ".jpe" && ext != ".jfif" && ext != ".png" {
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			f, openErr := b.FS.Open(photo.native)
+			if openErr != nil {
+				return
+			}
+			if ctx.Err() != nil {
+				_ = f.Close()
+				return
+			}
+			data, readErr := io.ReadAll(io.LimitReader(f, 128*1024))
+			_ = f.Close()
+			if readErr == nil {
+				photo.Taken = exif.Taken(data)
+				if photo.Rating == 0 {
+					photo.Rating = exif.Rating(data)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return timelineIndex{}, err
+	}
+	takenAt := func(photo timelinePhoto) time.Time {
+		if photo.Taken != "" {
+			if t, parseErr := time.ParseInLocation("2006-01-02 15:04", photo.Taken, time.Local); parseErr == nil {
+				return t
+			}
+		}
+		return photo.Mod
+	}
+	sort.SliceStable(photos, func(i, j int) bool {
+		ti, tj := takenAt(photos[i]), takenAt(photos[j])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return photos[i].Path < photos[j].Path
+	})
+	if err := ctx.Err(); err != nil {
+		return timelineIndex{}, err
+	}
+	return timelineIndex{photos: photos, scanned: scanned, truncated: truncated}, nil
 }
 
 func bindingAt(b *vfs.Binding, dir string) *vfs.Binding {

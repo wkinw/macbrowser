@@ -37,6 +37,10 @@ type Server struct {
 
 	labelMu    sync.Mutex
 	labelCache map[string]labelCacheItem
+
+	timelineMu    sync.Mutex
+	timelineCache map[string]timelineIndex
+	timelineBuild map[string]chan struct{}
 }
 
 type labelCacheItem struct {
@@ -44,8 +48,19 @@ type labelCacheItem struct {
 	at    time.Time
 }
 
+type timelineIndex struct {
+	photos    []timelinePhoto
+	scanned   int
+	truncated bool
+	at        time.Time
+}
+
 func New(cfg *config.Config, tc *thumbs.Cache, webDir string) *Server {
-	return &Server{cfg: cfg, thumbs: tc, webDir: webDir, labelCache: map[string]labelCacheItem{}}
+	return &Server{
+		cfg: cfg, thumbs: tc, webDir: webDir,
+		labelCache:    map[string]labelCacheItem{},
+		timelineCache: map[string]timelineIndex{}, timelineBuild: map[string]chan struct{}{},
+	}
 }
 
 // SetAuthToken enables access-token authentication. An empty token disables it.
@@ -159,6 +174,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.handleFile(w, r)
 	case "/api/find":
 		s.handleFind(w, r)
+	case "/api/timeline":
+		s.handleTimeline(w, r)
 	case "/api/open":
 		s.handleOpen(w, r)
 	case "/api/openwith":

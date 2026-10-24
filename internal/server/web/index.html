@@ -25,6 +25,7 @@
       <input id="addr" spellcheck="false" placeholder="路徑：C:\... 或 smb://名稱/...">
       <input id="search" placeholder="篩選目前資料夾…" title="Ctrl+F">
       <button id="findBtn" title="遞迴搜尋子資料夾">深入搜尋</button>
+      <button id="timelineBtn" class="tb" title="按拍攝時間瀏覽目前資料夾及子資料夾中的照片">時間線</button>
       <button id="uploadBtn" title="上傳檔案到此資料夾（也可直接拖檔案進來）">⬆ 上傳</button>
       <select id="sort" title="排序">
         <option value="name">名稱</option>
@@ -63,7 +64,7 @@
       <div id="empty" hidden>此資料夾是空的</div>
     </div>
     <input type="file" id="fileInput" multiple style="display:none">
-    <div id="status"><span id="statusL"></span><span id="statusR"></span></div>
+    <div id="status"><span id="statusL"></span><button id="timelineMore" class="tb" hidden>載入更多</button><button id="timelineAll" class="tb" hidden>載入全部</button><button id="timelineCancel" class="tb" hidden>取消</button><span id="statusR"></span></div>
   </main>
 </div>
 
@@ -102,6 +103,17 @@
 </div>
 
 <div id="hoverpreview" hidden><img alt=""><div class="hpcap"><span class="hpname"></span><span class="hptime"></span></div></div>
+
+<div id="timelineLoadingOverlay" hidden>
+  <div class="timeline-loading-card">
+    <span class="timeline-spinner"></span>
+    <strong id="timelineLoadingTitle">正在建立時間線索引</strong>
+    <span id="timelineLoadingMessage">正在掃描照片拍攝時間，首次建立可能需要一些時間。</span>
+    <div id="timelineProgress" class="timeline-progress indeterminate"><span id="timelineProgressBar"></span></div>
+    <span id="timelineElapsed">已用時 00:00</span>
+    <button id="timelineCancelOverlay" class="tb">取消載入</button>
+  </div>
+</div>
 
 <div id="toast" hidden></div>
 </body>

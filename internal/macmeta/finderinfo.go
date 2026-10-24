@@ -10,13 +10,13 @@ const (
 )
 
 var ColorNames = map[int]string{
-	1: "Gray",
-	2: "Green",
-	3: "Purple",
-	4: "Blue",
-	5: "Yellow",
-	6: "Red",
-	7: "Orange",
+	1: "灰色",
+	2: "綠色",
+	3: "紫色",
+	4: "藍色",
+	5: "黃色",
+	6: "紅色",
+	7: "橘色",
 }
 
 func ColorFromFinderInfo(fi []byte) int {

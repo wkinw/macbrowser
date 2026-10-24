@@ -13,7 +13,8 @@ and move files between Windows Explorer and your NAS with full clipboard support
 - Windows 10 / 11 (64-bit)
 - Microsoft Edge WebView2 Runtime (preinstalled on most systems; if the window is
   blank, install the Evergreen runtime from Microsoft)
-- Go 1.20+ — only needed if you build from source (`go build -o macbrowser.exe .`)
+- Go 1.20+ — only needed if you build from source. To build without a console
+  window, run `go build -ldflags="-H=windowsgui" -o macbrowser.exe .`.
 
 ## 2. Quick start
 
@@ -46,8 +47,8 @@ Example: `macbrowser.exe -addr 127.0.0.1:8890 -token my-secret -noopen`
 ## 3. The window
 
 - **Toolbar** — Back / Forward / Up, address bar (type a path such as `C:\Photos`
-  or `smb://nas/Share` and press Enter), quick filter, deep search, upload,
-  sort key + direction, tile size slider, hover-preview delay, and the
+  or `smb://nas/Share` and press Enter), quick filter, deep search, timeline,
+  upload, sort key + direction, tile size slider, hover-preview delay, and the
   “labels” / “hidden files” toggles.
 - **Color bar** — click a color chip to show only items with that label;
   click “All” to clear the filter. Chips combine (click several).
@@ -66,6 +67,19 @@ Example: `macbrowser.exe -addr 127.0.0.1:8890 -token my-secret -noopen`
 - The address bar accepts local paths (`C:\...`, UNC `\\server\share`), `smb://`
   paths for configured connections, and drive letters (`D:\`).
 - `F5` or `Ctrl+R` refreshes. `Esc` clears the selection.
+- **Timeline** — click “時間線” to gather photos in the current folder and its
+  subfolders into one grid, newest capture time first. Photos without EXIF capture
+  time use file modification time. Results load 500 photos per page, with a
+  separate “載入全部” action that fetches remaining results in batches; the server
+  caches the sorted index for 10 minutes. Global EXIF-time ordering requires a
+  one-time scan of image dates before the first page appears; labels and ratings
+  are fetched only for the page being shown. A prominent overlay shows an animated
+  progress bar and cancel button; “載入全部” reports a determinate loaded/total
+  bar. The status bar shows elapsed time, and a completion message reports photo
+  counts. Press `F5` to rebuild
+  the index. Scanning is capped at 50,000 photos, 300,000 filesystem
+  entries and 32 folder levels; the status bar warns if results may be incomplete.
+  Click “退出時間線” to return to the current folder.
 
 ## 5. Thumbnails, folder previews, hover preview
 
@@ -86,18 +100,19 @@ Example: `macbrowser.exe -addr 127.0.0.1:8890 -token my-secret -noopen`
 
 ## 6. Color labels (macOS compatible)
 
-Seven labels, matching Finder: 1 Gray, 2 Green, 3 Purple, 4 Blue, 5 Yellow,
-6 Red, 7 Orange. Colors can be set:
+Seven labels, matching Finder's color indexes: 1 灰色, 2 綠色, 3 紫色, 4 藍色,
+5 黃色, 6 紅色, 7 橘色. New labels are written with these Chinese names while
+keeping the Finder color index (for example, `紅色\n6`). Colors can be set:
 
 - Right-click any tile → click a color swatch (click the first, crossed swatch to clear).
 - In the lightbox, press `1`–`7` to tag the current image, `0` to clear.
 - Multiple selected tiles are labelled together.
 
 **macOS compatibility** — labels are stored in the formats macOS reads:
-Finder tags (`com.apple.metadata:_kMDItemUserTags`), the Finder info color flag,
-and (for SMB/NAS shares) an AppleDouble sidecar file (`._filename`). Files tagged
-here therefore show the correct color when the same share/folder is opened on a
-Mac. Folders are supported as well (folders never get a `._` sidecar).
+Finder tags (`com.apple.metadata:_kMDItemUserTags`), the FinderInfo color flag,
+and (for SMB/NAS shares) an AppleDouble sidecar file (`._filename`). The tag
+name and FinderInfo color index are written together; folders are supported as
+well (folders never get a `._` sidecar).
 
 Notes:
 
@@ -108,6 +123,8 @@ Notes:
   Windows apps simply ignore it.
 - Showing/hiding the colored dots is controlled by the “labels” checkbox in the
   toolbar.
+- While the window is visible, labels are checked every five seconds so changes
+  made in macOS Finder appear automatically.
 
 **Photo ratings (0–5 stars)** — ratings are read-only in MacBrowser. The stars
 appear in gold at the bottom-left of the tile (and in the lightbox top bar) and
@@ -240,7 +257,8 @@ passwords.
 
 - Windows 10 / 11（64 位元）
 - Microsoft Edge WebView2 Runtime（多數系統已內建；若視窗空白請安裝 Microsoft 的 Evergreen Runtime）
-- Go 1.20+ — 僅自行編譯時需要（`go build -o macbrowser.exe .`）
+- Go 1.20+ — 僅自行編譯時需要。要產生雙擊時不顯示 CMD 的版本，請執行
+  `go build -ldflags="-H=windowsgui" -o macbrowser.exe .`。
 
 ## 2. 快速開始
 
@@ -301,15 +319,15 @@ passwords.
 
 ## 6. 顏色標籤（相容 macOS）
 
-七種顏色，對應 Finder：1 灰、2 綠、3 紫、4 藍、5 黃、6 紅、7 橘。設定方式：
+七種顏色，對應 Finder 色號：1 灰色、2 綠色、3 紫色、4 藍色、5 黃色、6 紅色、7 橘色。設定方式：
 
 - 在磚上按右鍵 → 點色塊（點最左側帶斜線的色塊＝清除）。
 - 燈箱中按 `1`–`7` 為目前圖片上色，`0` 清除。
 - 多選後一次上色。
 
 **macOS 相容性** — 色標以 macOS 讀得懂的格式寫入：
-Finder tags（`com.apple.metadata:_kMDItemUserTags`）、Finder info 色旗標，
-以及（SMB／NAS 共享）AppleDouble 側車檔（`._檔名`）。
+Finder tags（`com.apple.metadata:_kMDItemUserTags`）、FinderInfo 色旗標，以及（SMB／NAS 共享）
+AppleDouble 側車檔（`._檔名`）。中文標籤名稱及 FinderInfo 色號會一同更新（例如 `紅色\n6`）。
 因此在本程式標色的檔案，在 Mac 上開啟同一共享／資料夾時會顯示正確顏色。
 資料夾也支援（資料夾不會產生 `._` 側車檔）。
 
@@ -319,6 +337,7 @@ Finder tags（`com.apple.metadata:_kMDItemUserTags`）、Finder info 色旗標�
   顯示出來，可開啟「隱藏檔」管理——但刪除它們會讓該檔案在 Mac 上失去中介資料。
 - 本機 NTFS 磁碟的色標以檔案屬性資料流儲存，其他 Windows 程式會直接忽略。
 - 是否顯示磚上的色點由工具列的「色標」核取方塊控制。
+- 視窗顯示時每 5 秒同步一次色標；在 macOS Finder 新增或修改的標籤會自動更新。
 
 **相片評等（0–5 星）** — 星等在此程式中為唯讀。星星以金色顯示在磚的左下角
 （燈箱頂端也會顯示），並可用方格上方的「評等篩選列」依星等篩選。評等讀取自

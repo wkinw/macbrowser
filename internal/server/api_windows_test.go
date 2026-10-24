@@ -388,7 +388,7 @@ func TestSetLabelsAPI(t *testing.T) {
 	}
 	ad := macmeta.ParseAppleDouble(adData)
 	if ad == nil || macmeta.ColorFromFinderInfo(ad.FinderInfo) != 4 {
-		t.Fatalf("apple double not updated: %+v", ad)
+		t.Fatalf("FinderInfo was not synchronized with UserTags: %+v", ad)
 	}
 	if ut := macmeta.ParseUserTags(ad.EAs[macmeta.UserTagsAttr]); ut == nil || ut.Color != 4 {
 		t.Fatalf("apple double tags = %+v", ut)
@@ -413,8 +413,8 @@ func TestSetLabelsAPI(t *testing.T) {
 	if _, ok := lblOut.Labels["pic.jpg"]; ok {
 		t.Fatalf("pic.jpg still labeled: %+v", lblOut.Labels["pic.jpg"])
 	}
-	if lbl, ok := lblOut.Labels["pic2.jpg"]; ok && lbl.Color != 0 {
-		t.Fatalf("pic2.jpg still labeled: %+v", lbl)
+	if lbl, ok := lblOut.Labels["pic2.jpg"]; ok {
+		t.Fatalf("pic2.jpg should no longer be labeled: %+v", lbl)
 	}
 	adData, err = os.ReadFile(filepath.Join(dir, "._pic2.jpg"))
 	if err != nil {
@@ -422,7 +422,7 @@ func TestSetLabelsAPI(t *testing.T) {
 	}
 	ad = macmeta.ParseAppleDouble(adData)
 	if ad == nil || macmeta.ColorFromFinderInfo(ad.FinderInfo) != 0 {
-		t.Fatalf("apple double not cleared: %+v", ad)
+		t.Fatalf("FinderInfo was not cleared with UserTags: %+v", ad)
 	}
 	if _, ok := ad.EAs[macmeta.UserTagsAttr]; ok {
 		t.Fatal("UserTags EA should be gone after clear")
@@ -809,5 +809,52 @@ func TestPhotoTimeAPI(t *testing.T) {
 	}
 	if len(out.Times) != 1 {
 		t.Fatalf("times = %+v", out.Times)
+	}
+}
+
+func TestTimelineAPICollectsAndSortsRecursivePhotos(t *testing.T) {
+	ts, dir := newTestServer(t)
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newer := filepath.Join(dir, "newer.jpg")
+	older := filepath.Join(sub, "older.jpg")
+	writeTestJPEGWithEXIF(t, newer, "2026:08:23 14:22:00")
+	writeTestJPEGWithEXIF(t, older, "2025:01:02 09:30:00")
+	if err := os.WriteFile(filepath.Join(sub, "notes.txt"), []byte("not a photo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Entries []struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			Taken string `json:"taken"`
+		} `json:"entries"`
+		Truncated  bool `json:"truncated"`
+		NextOffset int  `json:"nextOffset"`
+		Total      int  `json:"total"`
+		HasMore    bool `json:"hasMore"`
+	}
+	if code := getJSON(t, ts.URL+"/api/timeline?p="+url.QueryEscape(dir)+"&limit=1", &out); code != 200 {
+		t.Fatalf("timeline code = %d", code)
+	}
+	if out.Truncated {
+		t.Fatal("small test tree should not be truncated")
+	}
+	if len(out.Entries) != 1 || out.Total != 2 || out.NextOffset != 1 || !out.HasMore {
+		t.Fatalf("first page = %+v, want one of two photos and hasMore", out)
+	}
+	if out.Entries[0].Path != newer || out.Entries[0].Taken != "2026-08-23 14:22" {
+		t.Fatalf("newest photo = %+v", out.Entries[0])
+	}
+	if code := getJSON(t, ts.URL+"/api/timeline?p="+url.QueryEscape(dir)+"&offset=1&limit=1", &out); code != 200 {
+		t.Fatalf("timeline second page code = %d", code)
+	}
+	if len(out.Entries) != 1 || out.Total != 2 || out.NextOffset != 2 || out.HasMore {
+		t.Fatalf("second page = %+v, want final one-photo page", out)
+	}
+	if out.Entries[0].Path != older || out.Entries[0].Taken != "2025-01-02 09:30" {
+		t.Fatalf("older photo = %+v", out.Entries[0])
 	}
 }

@@ -2,9 +2,50 @@ package vfs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 )
+
+func TestAFPInfoFinderInfoRoundTrip(t *testing.T) {
+	fi := make([]byte, 32)
+	fi[9] = 4
+	wrapped, err := afpInfoWithFinderInfo(nil, fi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrapped) != smbAFPInfoSize {
+		t.Fatalf("AFP_AfpInfo length = %d, want %d", len(wrapped), smbAFPInfoSize)
+	}
+	if got := binary.LittleEndian.Uint32(wrapped[:4]); got != 0x41465000 {
+		t.Fatalf("AFP signature = %#x", got)
+	}
+	if got := binary.LittleEndian.Uint32(wrapped[4:8]); got != 0x00000100 {
+		t.Fatalf("AFP version = %#x", got)
+	}
+	gotFI, ok := finderInfoFromAFPInfo(wrapped)
+	if !ok || !bytes.Equal(gotFI, fi) {
+		t.Fatalf("unwrapped FinderInfo = %x, want %x", gotFI, fi)
+	}
+
+	existing := bytes.Repeat([]byte{0x5a}, smbAFPInfoSize)
+	updated, err := afpInfoWithFinderInfo(existing, fi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(updated[:smbAFPInfoOffset], existing[:smbAFPInfoOffset]) {
+		t.Fatal("updating FinderInfo changed AFP_AfpInfo header fields")
+	}
+	if !bytes.Equal(updated[smbAFPInfoOffset+32:], existing[smbAFPInfoOffset+32:]) {
+		t.Fatal("updating FinderInfo changed AFP_AfpInfo trailing fields")
+	}
+}
+
+func TestAFPInfoRejectsInvalidFinderInfoLength(t *testing.T) {
+	if _, err := afpInfoWithFinderInfo(nil, make([]byte, 31)); err == nil {
+		t.Fatal("expected invalid FinderInfo length to be rejected")
+	}
+}
 
 func TestSMBPathMapping(t *testing.T) {
 	f := &smbFS{conn: Connection{Name: "nas", Host: "h", Share: "media", Base: "Photos"}}

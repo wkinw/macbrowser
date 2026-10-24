@@ -120,9 +120,10 @@ func main() {
 
 	if !*browserOnly {
 		if w := webview2.NewWithOptions(webview2.WebViewOptions{
-			Debug:     *debug,
-			AutoFocus: true,
-			DataPath:  filepath.Join(*dataDir, "webview"),
+			Debug:       *debug,
+			AutoFocus:   true,
+			DisableZoom: true,
+			DataPath:    filepath.Join(*dataDir, "webview"),
 			WindowOptions: webview2.WindowOptions{
 				Title:  "MacBrowser — 檔案瀏覽器",
 				Width:  1280,

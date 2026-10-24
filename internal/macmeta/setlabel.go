@@ -106,43 +106,39 @@ func SetLabelNode(fs Writer, dir, name string, color int, isDir bool) error {
 	full := fs.Join(dir, name)
 	fiRaw, _ := fs.Xattr(full, FinderInfoAttr)
 	fi := FinderInfoWithColor(fiRaw, color)
-	tags, terr := BuildUserTags(color)
+	tags, err := BuildUserTags(color)
+	if err != nil {
+		return fmt.Errorf("建立 Finder 色標失敗：%w", err)
+	}
+	tagsErr := fs.WriteXattr(full, UserTagsAttr, tags)
+	fiErr := fs.WriteXattr(full, FinderInfoAttr, fi)
 
-	tagsOK := false
-	if terr == nil {
-		if err := fs.WriteXattr(full, UserTagsAttr, tags); err == nil {
-			tagsOK = true
-		}
-	}
-	wroteFI := false
-	if err := fs.WriteXattr(full, FinderInfoAttr, fi); err == nil {
-		wroteFI = true
-	}
 	forceAD := false
 	if !isDir {
 		if aw, ok := fs.(interface{ AppleDoubleSidecar() bool }); ok {
 			forceAD = aw.AppleDoubleSidecar()
 		}
 	}
-	if tagsOK {
-		if forceAD {
-			createOrUpdateAD(fs, dir, name, fi, color)
-		} else if !isDir {
-			updateADIfExists(fs, dir, name, fi, color)
+	if isDir {
+		if tagsErr != nil || fiErr != nil {
+			return fmt.Errorf("無法同步資料夾 Finder 色標（UserTags: %v；FinderInfo: %v）", tagsErr, fiErr)
 		}
 		return nil
 	}
-	if isDir {
-		if wroteFI {
-			return nil
+	if forceAD {
+		if err := createOrUpdateAD(fs, dir, name, fi, color); err != nil {
+			return fmt.Errorf("無法同步 Finder 標籤側車檔（UserTags: %v；FinderInfo: %v）：%w", tagsErr, fiErr, err)
 		}
-		return fmt.Errorf("此位置無法儲存資料夾色標（檔案系統不支援目錄屬性）")
+		return nil
+	}
+	if tagsErr == nil && fiErr == nil {
+		if err := updateADIfExists(fs, dir, name, fi, color); err != nil {
+			return fmt.Errorf("更新既有 Finder 標籤側車檔失敗：%w", err)
+		}
+		return nil
 	}
 	if err := createOrUpdateAD(fs, dir, name, fi, color); err != nil {
-		if wroteFI {
-			return nil
-		}
-		return fmt.Errorf("此位置無法儲存色標：%w", err)
+		return fmt.Errorf("無法同步 Finder 色標（UserTags: %v；FinderInfo: %v；AppleDouble: %w）", tagsErr, fiErr, err)
 	}
 	return nil
 }
@@ -160,10 +156,11 @@ func readAD(fs Writer, dir, name string) *AppleDouble {
 	return ParseAppleDouble(data)
 }
 
-func updateADIfExists(fs Writer, dir, name string, fi []byte, color int) {
+func updateADIfExists(fs Writer, dir, name string, fi []byte, color int) error {
 	if ad := readAD(fs, dir, name); ad != nil {
-		writeAD(fs, dir, name, fi, color, ad)
+		return writeAD(fs, dir, name, fi, color, ad)
 	}
+	return nil
 }
 
 func createOrUpdateAD(fs Writer, dir, name string, fi []byte, color int) error {
@@ -187,9 +184,11 @@ func writeAD(fs Writer, dir, name string, fi []byte, color int, ad *AppleDouble)
 		}
 	}
 	if color > 0 {
-		if tags, err := BuildUserTags(color); err == nil {
-			eas[UserTagsAttr] = tags
+		tags, err := BuildUserTags(color)
+		if err != nil {
+			return err
 		}
+		eas[UserTagsAttr] = tags
 	}
 	return fs.WriteFile(fs.Join(dir, "._"+name), BuildAppleDouble(fi, eas, comment))
 }
